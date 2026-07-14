@@ -1,0 +1,180 @@
+db_path: db/safari.sqlite
+
+# Seed = starting point. One forum board or thread URL (or reddit later, if API opens).
+seed_urls: []
+
+# Per-stage retry: transient stage failures (Chromium/ICU launch crash, network
+# blip, rate-limit burst) are retried with exponential backoff instead of killing
+# the whole run. Applies to both the live web worker and `python -m pipeline.resume`.
+retry:
+  attempts: 3        # total tries per stage
+  base_delay: 5      # backoff seconds, doubles each retry (5 -> 10 -> 20)
+
+collection:
+  max_threads: 100
+  thread_url_pattern: "/t/"     # Discourse thread path; adjust per forum
+  thread_url_patterns: ["/t/", "/threads/", "/comments/"]  # Common topic/thread URL markers
+  same_domain_only: true
+  fallback: xenforo             # none | firecrawl | playwright | auto | xenforo | render
+  # Adaptive rate-limit control for the XenForo collector. Each 403/429 multiplies the
+  # inter-request delay by `backoff` (capped at max_multiplier) and retries the same
+  # request after an escalating cooldown; successes decay the multiplier back toward 1.
+  rate_limit:
+    backoff: 1.6            # delay multiplier bump per 403/429
+    max_multiplier: 8.0    # cap on the multiplier
+    recover: 0.9           # decay toward 1.0 on each success
+    retries: 2             # adaptive retries of a 403'd request before skipping the thread
+    cooldown_seconds: 5.0  # base pause on a 403 (scaled by the current multiplier)
+  # render = auto-pick renderer: XenForo if the board is XenForo, else Playwright (GUI "Render" toggle)
+  # Reddit: auto-detected by host, uses free public JSON (per-comment, authored).
+  reddit:
+    sort: hot                   # hot | top | new | controversial
+    time_filter: year           # only applies to top/controversial
+    refresh_sort_cycle: [new, hot, top]  # corpus refresh: rotate filters when one goes stale
+    backfill_sort_cycle: [new, top:all, top:year, controversial:all, hot]  # historical catch-up
+    search_assist_limit: 40     # Firecrawl-discovered Reddit thread URLs to pre-seed before listing crawl
+    search_assist_queries: ["site:reddit.com/r/{sub}/comments/"]  # {sub} = subreddit name
+    max_comments_per_thread: 200
+    comment_depth: 8
+    min_comment_len: 20
+    min_delay_seconds: 4.0
+    max_delay_seconds: 9.0
+    cooldown_every_minutes: 0   # 0 = off
+    cooldown_minutes: 0         # 0 = off
+    backfill_cooldown_every_minutes: 45  # during historical subreddit backfills, work ~45m...
+    backfill_cooldown_minutes: 30        # ...then take a visible 30m cooldown
+  playwright:
+    headless: true
+    min_delay_seconds: 3
+    max_delay_seconds: 8
+    timeout_ms: 30000
+    wait_after_load_ms: 2000
+    scroll_steps: 3          # 0 = off; >0 = min scroll rounds before a plateau can stop us
+    scroll_delay_ms: 700     # wait after each scroll for lazy content to load
+    max_scrolls: 40          # hard cap on infinite-scroll rounds (safety)
+    scroll_settle_rounds: 2  # consecutive no-growth rounds that prove feed is exhausted
+    allowed_domains: []
+
+# Optional pre-filter on thread titles/urls (empty = keep all). Leave EMPTY for topic/
+# discovery runs and arbitrary seeds - a chosen community is already on-topic, and a
+# domain-specific list here silently guts collection (e.g. laser words on a non-laser sub).
+# Set per-seed only when you deliberately want to narrow one board's threads.
+keywords: []
+
+# §3 pain extraction
+# providers = ordered try-list. First that succeeds wins; a fallback-eligible error
+# (see fallback_on) advances to the next. The GUI "Extractor" dropdown overrides this
+# per-run: Claude -> [claude, codex]; Qwen -> [qwen, claude]; GLM -> [glm, claude].
+extract:
+  batch_size: 6
+  providers: [qwen, claude]   # local qwen primary; Claude fallback if endpoint down/errors
+  claude_model: sonnet
+  fallback_on: ["API 429", "429", "monthly usage limit", "usage limit",
+                "connection error", "connection refused", "timed out", "timeout"]
+  claude_timeout: 180
+  codex_timeout: 300
+  local_timeout: 300
+  # Local extractors via any OpenAI-compatible server (Ollama / LM Studio / vLLM /
+  # llama.cpp). Set base_url + model to your setup. Toggle from the GUI dropdown or
+  # by putting the name in `providers` above.
+  qwen:
+    base_url: http://localhost:11434/v1   # Ollama default (LM Studio :1234/v1, vLLM :8000/v1)
+    model: qwen2.5:14b-instruct           # ~9GB Q4, fits 16GB VRAM; `ollama list` for options
+    api_key: ""                           # blank ok for local; Ollama ignores it
+    temperature: 0
+  glm:
+    base_url: http://localhost:11434/v1
+    model: glm4:9b
+    api_key: ""
+    temperature: 0
+  codex:
+    # Uses Codex CLI via npm. {output} is replaced with a temp file path.
+    command:
+      - npx.cmd
+      - -y
+      - "@openai/codex"
+      - exec
+      - --skip-git-repo-check
+      - --ephemeral
+      - --ignore-rules
+      - --sandbox
+      - read-only
+      - --output-last-message
+      - "{output}"
+      - "-"
+
+# §4 embeddings — bge-small = fast/small; swap to BAAI/bge-large-en-v1.5 (1.3GB) for quality
+embed_model: BAAI/bge-small-en-v1.5
+
+# §3.5 persona canonicalization: consolidate the free-text persona per pain into a small
+# set of reusable audience segments (one LLM call). Fixes "one unique persona per pain".
+personas:
+  enabled: true
+  max_segments: 12
+
+# §5 clustering
+cluster:
+  min_cluster_size: 2
+  cluster_selection_method: leaf   # leaf = finer themes; eom = few big blobs (old default)
+  min_cohesion: 0.55               # split any cluster looser than this (grab-bag guard)
+
+# §6 demand scoring weights
+scoring_weights:
+  pain_intensity: 3
+  frequency: 3
+  willingness_to_pay: 3
+  reachability: 2
+  recurrence_score: 3
+
+# §7 warning flags (advisory only; never drops by itself)
+hard_filters:
+  - requires_soc2_hipaa
+  - two_sided_marketplace
+  - closed_api_dependency
+  - regulated_liability
+
+# §9 rank = demand * persistence / (1 + saturation) * solvable_weight.
+# Saturation is backfilled from real competitor counts (see competitors.cover_top);
+# solvable_weight down-weights themes a pure software product can't solve, so social /
+# hardware pains don't outrank software-shaped ones.
+rank:
+  solvable_weights: {yes: 1.0, partial: 0.6, no: 0.25, unknown: 0.5}
+
+# §7.5 soft filter: LLM tags each theme software-solvable (yes/partial/no) for UI color.
+# Advisory only - never drops. One extractor call per run.
+soft_filter:
+  enabled: true
+
+# §8 competitor discovery sources
+competitor_sources: [web, g2, capterra, producthunt, appstore]
+
+# §9.5 competitor discovery: LLM names real existing products per top-N theme,
+# with a review_domain to point the low-star review miner at. Advisory - never drops.
+competitors:
+  enabled: true
+  cover_top: 0    # 0 = ALL themes (one batched call). Covering all avoids the gap where the
+                  # solvability re-rank promotes an uncovered theme into the final top-N.
+
+# §9.6 review mining: pull 1-2 star app-store reviews of each competitor via free public
+# Apple endpoints (Search API + customer-reviews RSS). No key, no scraping. Advisory.
+reviews:
+  enabled: true
+  countries: [ph, us]   # app-store storefronts to search; first match wins per competitor
+  max_pages: 3
+  max_stars: 2
+  max_per_competitor: 25
+
+# Pre-stage-1 topic discovery: Firecrawl-search a topic for communities, then validate
+# legitimacy (real posters) before a run. Firecrawl-gated (opt-in), one run per source.
+discover:
+  candidate_limit: 8      # web-search results to validate per topic
+  min_authors: 3          # distinct authors for an authored source to read "legit"
+  probe_limit: 5          # threads/posts to sample per candidate
+  min_threads: 5          # thread links for a generic (structural) source to pass "weak"
+
+# §10 idea generation
+ideas:
+  top_n: 5
+
+# §12 report output
+report_dir: reports

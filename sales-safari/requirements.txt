@@ -1,0 +1,12 @@
+requests>=2.31
+pyyaml>=6
+python-dotenv>=1
+
+fastapi>=0.110
+uvicorn>=0.29
+playwright>=1.48
+
+sentence-transformers>=3
+hdbscan>=0.8
+umap-learn>=0.5
+numpy>=1.26

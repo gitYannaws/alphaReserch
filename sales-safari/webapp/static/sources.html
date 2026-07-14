@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sources</title>
+<style>
+  :root{--bg:#101114;--panel:#17191f;--line:#2a2e38;--fg:#e8eaee;--mut:#8f98a8;--acc:#f2734e;--ok:#4fb06d;--err:#f05d5e}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:12px}
+  h1{font-size:18px;margin:0}
+  .sub{color:var(--mut);font-size:13px}
+  .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
+  main{max-width:1120px;margin:0 auto;padding:22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
+  label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-bottom:8px}
+  .row{display:flex;gap:12px;align-items:end;flex-wrap:wrap}
+  input,select{background:#0c0d11;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:10px 12px;font-size:14px}
+  input[type=text],input:not([type]){width:100%;max-width:320px}
+  button{background:var(--acc);color:#1a0e08;border:0;border-radius:6px;padding:10px 16px;font-weight:700;cursor:pointer}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.secondary{background:transparent;border:1px solid var(--line);color:var(--fg);font-weight:400}
+  button.warn{background:var(--err);color:#1a0e08}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  .dim{color:var(--mut)}
+  .err{color:var(--err);margin-top:8px}
+  a{color:var(--acc);text-decoration:none}
+  .toggle{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--mut)}
+  .toggle input{width:auto}
+  .badge{display:inline-block;padding:2px 9px;border-radius:16px;font-size:12px;border:1px solid var(--acc);color:var(--acc)}
+  .badge.done,.badge.ok{color:var(--ok);border-color:var(--ok)}
+  .badge.warn{color:#e0a030;border-color:#e0a030}
+  .badge.err{color:var(--err);border-color:var(--err)}
+  .badge.dim{color:var(--mut);border-color:var(--line)}
+  .kickbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .progbar{background:#0c0d11;border:1px solid var(--line);border-radius:5px;height:8px;overflow:hidden;flex:1;min-width:160px}
+  .progfill{background:var(--acc);height:100%;transition:width .3s}
+  .tag{display:inline-block;padding:1px 8px;border-radius:12px;font-size:11px;border:1px solid var(--line);color:var(--mut);text-transform:lowercase}
+  code{font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Sources</h1>
+  <span class="sub">forums / subreddits you collect and analyze over time</span>
+  <nav class="nav"><a href="/">Main App</a></nav>
+</header>
+<main>
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>Subreddit / blog URL</label>
+        <input id="addUrl" placeholder="https://www.reddit.com/r/subreddit/top/">
+      </div>
+      <div>
+        <label>Label (optional)</label>
+        <input id="addLabel" placeholder="subreddit">
+      </div>
+      <button id="addBtn">Add source</button>
+    </div>
+    <div id="addErr" class="err"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <label style="margin:0">Tracked sources <span class="dim" id="selCount"></span></label>
+      <div class="row" style="gap:16px">
+        <div style="width:150px">
+          <label style="margin-bottom:4px">Extractor</label>
+          <select id="koExtractor">
+            <option value="qwen" selected>Qwen (local)</option>
+            <option value="claude">Claude CLI</option>
+            <option value="glm">GLM (local)</option>
+          </select>
+        </div>
+        <button id="analyzeBtn" disabled title="Pick 1-15 collected sources to enable">Analyze (3&rarr;15)</button>
+      </div>
+    </div>
+    <div class="dim" style="margin-top:8px;font-size:12px">
+      <b>Analyze</b> runs extraction &rarr; report over already-collected corpora (stages 3-15), 1-15 sources.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:28px"><input type="checkbox" id="selAll"></th>
+          <th>Platform</th>
+          <th>Source</th>
+          <th>Label</th>
+          <th>Posts</th>
+          <th>Threads</th>
+          <th>Authors</th>
+          <th>Size</th>
+          <th>Latest post</th>
+          <th>Last collected</th>
+          <th>Freshness</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="card" id="kickoffCard" style="display:none">
+    <div class="kickbar">
+      <label style="margin:0">Kickoff progress</label>
+      <span class="badge" id="koBadge">running</span>
+      <div class="progbar"><div class="progfill" id="koFill" style="width:0%"></div></div>
+      <span class="dim" id="koCount"></span>
+      <button id="koStop" class="secondary warn">Stop</button>
+    </div>
+    <div class="dim" id="koCurrent" style="margin-top:8px"></div>
+    <div id="koJobs" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"></div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+function esc(s){return String(s ?? "").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
+function fmtWhen(s){
+  if(!s) return "-";
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toLocaleString();
+}
+function fmtBytes(n){
+  const bytes = Number(n || 0);
+  if(bytes <= 0) return "0 B";
+  const gb = 1024 ** 3, mb = 1024 ** 2, kb = 1024;
+  if(bytes >= gb) return `${(bytes / gb).toFixed(2)} GB`;
+  if(bytes >= mb) return `${(bytes / mb).toFixed(1)} MB`;
+  if(bytes >= kb) return `${(bytes / kb).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+function splitKey(key){
+  const s = String(key || "");
+  const i = s.indexOf(":");
+  return i < 0 ? {platform: "-", name: s} : {platform: s.slice(0, i), name: s.slice(i + 1)};
+}
+const KICKOFF_MAX = 15;
+let SOURCES = [];
+let koPoll = null;
+
+async function loadSources(){
+  SOURCES = await (await fetch("/api/sources")).json();
+  renderRows();
+}
+function selectedIds(){
+  return Array.from(document.querySelectorAll(".srcChk:checked")).map(c => c.dataset.id);
+}
+function updateSelCount(){
+  const n = selectedIds().length;
+  $("selCount").textContent = n ? `(${n} selected)` : "";
+  const canAnalyze = n >= 1 && n <= KICKOFF_MAX;
+  $("analyzeBtn").disabled = !canAnalyze;
+  $("analyzeBtn").title = canAnalyze
+    ? `Analyze ${n} collected corpora (stages 3-15)`
+    : `Pick 1-${KICKOFF_MAX} sources to analyze (currently ${n})`;
+}
+const FRESHNESS = {
+  no_data:     {label: "No data",     cls: "dim"},
+  backfilling: {label: "Backfilling", cls: "warn"},
+  growing:     {label: "Growing",     cls: "warn"},
+  up_to_date:  {label: "Up to date",  cls: "ok"},
+  stale:       {label: "Stale",       cls: "err"},
+};
+function freshnessBadge(s){
+  const f = FRESHNESS[s.freshness] || FRESHNESS.no_data;
+  let detail = "";
+  if(s.freshness === "up_to_date" || s.freshness === "stale" || s.freshness === "growing"){
+    const n = s.last_run_new_docs;
+    const d = s.days_since_last_run;
+    const parts = [];
+    if(n != null) parts.push(`+${n} last run`);
+    if(d != null) parts.push(d < 1 ? "today" : `${Math.round(d)}d ago`);
+    detail = parts.length ? ` <span class="dim" style="font-size:11px">(${parts.join(", ")})</span>` : "";
+  }
+  return `<span class="badge ${f.cls}">${f.label}</span>${detail}`;
+}
+function renderRows(){
+  $("rows").innerHTML = SOURCES.length ? SOURCES.map(s => {
+    const k = splitKey(s.corpus_key);
+    return `
+    <tr>
+      <td><input type="checkbox" class="srcChk" data-id="${esc(s.id)}"></td>
+      <td><span class="tag">${esc(k.platform)}</span></td>
+      <td><code title="${esc(s.url)}">${esc(k.name)}</code></td>
+      <td>${esc(s.label || "-")}</td>
+      <td>${esc(s.doc_count || 0)}</td>
+      <td>${esc(s.thread_count || 0)}</td>
+      <td>${esc(s.author_count || 0)}</td>
+      <td class="dim">${esc(fmtBytes(s.total_bytes))}</td>
+      <td class="dim">${esc(fmtWhen(s.latest_post_at))}</td>
+      <td class="dim">${esc(fmtWhen(s.last_fetched_at))}</td>
+      <td>${freshnessBadge(s)}</td>
+      <td><button class="secondary" data-del="${esc(s.id)}">Remove</button></td>
+    </tr>`;
+  }).join("")
+    : `<tr><td colspan="12" class="dim">no sources tracked yet — add one above</td></tr>`;
+  document.querySelectorAll(".srcChk").forEach(c => c.addEventListener("change", updateSelCount));
+  document.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
+    await fetch(`/api/sources/${b.dataset.del}`, {method:"DELETE"});
+    loadSources();
+  }));
+  updateSelCount();
+}
+
+$("selAll").addEventListener("change", e => {
+  document.querySelectorAll(".srcChk").forEach(c => c.checked = e.target.checked);
+  updateSelCount();
+});
+
+$("addBtn").addEventListener("click", async () => {
+  const url = $("addUrl").value.trim();
+  $("addErr").textContent = "";
+  if(!url){ $("addErr").textContent = "url required"; return; }
+  const r = await fetch("/api/sources", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({url, label: $("addLabel").value.trim() || null})});
+  const data = await r.json();
+  if(!r.ok){ $("addErr").textContent = data.error || "failed to add"; return; }
+  $("addUrl").value = ""; $("addLabel").value = "";
+  loadSources();
+});
+
+async function startKickoff(mode){
+  const source_ids = selectedIds();
+  const r = await fetch("/api/sources/kickoff", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      source_ids,
+      mode,
+      use_corpus: true,
+      extractor: $("koExtractor").value,
+    })});
+  const data = await r.json();
+  if(!r.ok){ alert(data.error || "kickoff failed"); return; }
+  $("kickoffCard").style.display = "block";
+  pollKickoff(data.kickoff_id);
+}
+$("analyzeBtn").addEventListener("click", () => startKickoff("analyze"));
+
+$("koStop").addEventListener("click", async () => {
+  const id = $("kickoffCard").dataset.kickoffId;
+  if(id) await fetch(`/api/sources/kickoff/${id}/stop`, {method:"POST"});
+});
+
+function pollKickoff(id){
+  $("kickoffCard").dataset.kickoffId = id;
+  if(koPoll) clearInterval(koPoll);
+  const tick = async () => {
+    const r = await fetch(`/api/sources/kickoff/${id}`);
+    if(!r.ok) return;
+    const k = await r.json();
+    const pct = k.total ? Math.round((k.done / k.total) * 100) : 0;
+    $("koFill").style.width = pct + "%";
+    $("koCount").textContent = `${k.done}/${k.total}`;
+    $("koBadge").className = "badge" + (k.status === "done" ? " done" : "");
+    $("koBadge").textContent = (k.mode || "collect") + " · " + k.status;
+    $("koCurrent").textContent = k.current_source
+      ? `now collecting: ${k.current_source} (job ${k.current_job_id})` : "";
+    $("koJobs").innerHTML = k.job_ids.map(j =>
+      `<a href="/?job=${j}" target="_blank">${j}</a>`).join("");
+    if(k.status !== "running"){
+      clearInterval(koPoll);
+      loadSources();
+    }
+  };
+  tick();
+  koPoll = setInterval(tick, 2000);
+}
+
+loadSources();
+</script>
+</body>
+</html>

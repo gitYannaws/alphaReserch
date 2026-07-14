@@ -1,0 +1,9 @@
+.env
+db/
+reports/
+__pycache__/
+*.pyc
+.venv/
+*.log
+*.pid
+webapp/uvicorn*

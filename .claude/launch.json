@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "safari",
+      "runtimeExecutable": "sales-safari/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "webapp.app:app", "--app-dir", "sales-safari", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

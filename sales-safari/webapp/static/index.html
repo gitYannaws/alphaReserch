@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sales Safari</title>
+<style>
+  :root{--bg:#101114;--panel:#17191f;--line:#2a2e38;--fg:#e8eaee;--mut:#8f98a8;--acc:#f2734e;--ok:#4fb06d;--err:#f05d5e;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:12px}
+h1{font-size:18px;margin:0}
+header .sub{color:var(--mut);font-size:13px}
+header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
+  main{max-width:1120px;margin:0 auto;padding:22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
+  label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-bottom:6px}
+  input{width:100%;background:#0c0d11;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:10px 12px;font-size:14px}
+  select{width:100%;background:#0c0d11;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:10px 12px;font-size:14px}
+  button{background:var(--acc);color:#1a0e08;border:0;border-radius:6px;padding:11px 18px;font-weight:700;cursor:pointer;font-size:14px}
+  button:disabled{opacity:.5;cursor:default}
+  button.secondary{background:transparent;color:var(--fg);border:1px solid var(--line)}
+  button.secondary.warn{color:var(--err);border-color:var(--err)}
+  .row{display:flex;gap:12px;align-items:end}
+  .grow{flex:1}.limit{width:112px}
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field label{margin-bottom:0}
+  .seedfield{margin-bottom:18px}
+  .seedfield input{font-size:15px;padding:12px 14px}
+  .optrow{display:flex;flex-wrap:wrap;gap:22px 26px;align-items:end;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+  .optrow .field{min-width:108px}
+  .optrow #extractorWrap,.optrow #collectorWrap{min-width:160px}
+  .switchgroup{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;margin-left:auto}
+  .toggle{display:flex;align-items:center;gap:9px;color:var(--mut);font-size:13px;white-space:nowrap;cursor:pointer}
+  .switch{position:relative;display:inline-block;width:34px;height:19px;flex:none}
+  .switch input{opacity:0;width:0;height:0;position:absolute}
+  .switch .slider{position:absolute;inset:0;background:#0c0d11;border:1px solid var(--line);border-radius:20px;transition:.15s}
+  .switch .slider:before{content:"";position:absolute;height:13px;width:13px;left:2px;top:1px;background:var(--mut);border-radius:50%;transition:.15s}
+  .switch input:checked ~ .slider{background:rgba(242,115,78,.35) !important;border-color:var(--acc) !important}
+  .switch input:checked ~ .slider:before{transform:translateX(15px) !important;background:var(--acc) !important}
+  .actionsrow{display:flex;gap:10px;justify-content:flex-end}
+  .stats{display:flex;gap:22px;flex-wrap:wrap}
+  .stat b{font-size:24px;display:block;font-variant-numeric:tabular-nums}
+  .stat span{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .badge{display:inline-block;padding:2px 9px;border-radius:16px;font-size:12px;border:1px solid var(--line)}
+  .badge.starting,.badge.collecting,.badge.storing,.badge.extracting,.badge.embedding,.badge.clustering,.badge.scoring,.badge.filtering,.badge.competing,.badge.ranking,.badge.ideating,.badge.validating,.badge.reporting{color:var(--acc);border-color:var(--acc)}
+  .badge.soft-filtering,.badge.competitor-discovery,.badge.review-mining{color:var(--acc);border-color:var(--acc)}
+  .badge.done,.badge.reported{color:var(--ok);border-color:var(--ok)}.badge.error,.badge.cancelled,.badge.interrupted{color:var(--err);border-color:var(--err)}
+  .badge.recovering{color:#7fb5ff;border-color:#7fb5ff}
+  .badge.resting{color:#ffd166;border-color:#ffd166}
+  .badge.stopping{color:var(--err);border-color:var(--err)}
+  .pipe{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
+  .step{font-size:11px;padding:3px 8px;border:1px solid var(--line);border-radius:5px;color:var(--mut)}
+  .step.done{color:var(--ok);border-color:var(--ok)}.step.now{color:var(--acc);border-color:var(--acc);animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.55}}
+  .progwrap{margin-top:14px;display:none}
+  .proglabel{font-size:12px;color:var(--mut);margin-bottom:5px;display:flex;justify-content:space-between;gap:12px}
+  .proglabel b{color:var(--fg);font-weight:600}
+  .progbar{height:8px;background:#0c0d11;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .progfill{height:100%;background:var(--acc);width:0;border-radius:6px;transition:width .4s ease}
+  .progfill.indet{width:35%;animation:indet 1.2s ease-in-out infinite}
+  @keyframes indet{0%{margin-left:-40%}100%{margin-left:105%}}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  td.dim{color:var(--mut);white-space:nowrap}td.big{font-variant-numeric:tabular-nums;font-weight:700}
+  a{color:var(--acc);text-decoration:none}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+  .idea{border:1px solid var(--line);border-radius:8px;padding:12px;background:#13151a}
+  .idea h3{font-size:15px;margin:0 0 8px}
+  .idea p{margin:0 0 10px;color:#cfd3dc}
+  .idea .test{color:var(--mut);font-size:13px}
+  .comps{margin-top:10px;font-size:13px}.comps ul{margin:4px 0 0;padding-left:18px}.comps li{margin:2px 0}
+  .revs{margin:3px 0 6px}.revs summary{cursor:pointer;color:var(--err);font-size:12px}
+  .revs ul{margin:4px 0 0;padding-left:16px}.revs li{margin:3px 0;color:var(--mut);font-size:12px}
+  .revs .star{color:var(--err);letter-spacing:-1px}
+  .step{cursor:help}
+  .filters-off{opacity:.4;pointer-events:none;filter:grayscale(1)}
+  .slicers{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-bottom:12px}
+  .slicergroup{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .slicergroup .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-right:2px}
+  .chip{cursor:pointer;font-size:12px;padding:3px 11px;border:1px solid var(--line);border-radius:14px;color:var(--mut);background:transparent;user-select:none}
+  .chip:hover{border-color:var(--acc)}
+  .chip.on{color:#1a0e08;background:var(--acc);border-color:var(--acc);font-weight:600}
+  .srcs{margin-top:6px}.srcs summary{cursor:pointer;color:var(--acc);font-size:12px}
+  .srcs ul{margin:5px 0 0;padding-left:16px}.srcs li{margin:4px 0;color:var(--mut);font-size:12px;line-height:1.4}
+  .srcs a{font-size:12px}
+  .scorebits{margin-top:6px;color:var(--mut);font-size:12px}
+  .scorebits summary{cursor:pointer;color:var(--acc)}
+  .scorebits code{color:#cfd3dc}
+  .warnflag{display:inline-block;margin:4px 4px 0 0;padding:2px 7px;border:1px solid var(--err);border-radius:12px;color:var(--err);font-size:11px}
+  .help{margin-top:10px;color:var(--mut);font-size:13px}
+  .quote{color:#f4a089}
+  /* Pains table: fixed layout so one long theme label can't hog the row. */
+  #painsCard table{table-layout:fixed}
+  #painsCard td{overflow-wrap:anywhere;white-space:normal}  /* override .dim nowrap so theme wraps */
+  #painsCard th:nth-child(1),#painsCard td:nth-child(1){width:15%}
+  #painsCard th:nth-child(2),#painsCard td:nth-child(2){width:22%}
+  #painsCard th:nth-child(3),#painsCard td:nth-child(3){width:28%}
+  #painsCard th:nth-child(4),#painsCard td:nth-child(4){width:27%}
+  #painsCard th:nth-child(5),#painsCard td:nth-child(5){width:8%}
+  .solv{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle;background:var(--mut)}
+  .solv.yes{background:var(--ok)}.solv.partial{background:var(--acc)}.solv.no{background:var(--mut);opacity:.55}
+  .solv.unknown{background:transparent;border:1px solid var(--line)}
+  .solvlegend{margin:10px 2px 0;font-size:12px;color:var(--mut);display:flex;gap:18px;flex-wrap:wrap}
+  .actions{display:flex;gap:8px;align-items:center}
+  .pager{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+  .pager button:disabled{opacity:.35;cursor:default}
+  .modeswitch{display:flex;margin-bottom:14px;width:max-content;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .seg{background:transparent;color:var(--mut);border:0;border-radius:0;padding:7px 18px;font-weight:600}
+  .seg.active{background:var(--acc);color:#1a0e08}
+  .candchk{width:auto}
+  .small{font-size:12px;color:var(--mut)}
+  pre{white-space:pre-wrap;background:#0c0d11;border:1px solid var(--line);border-radius:8px;padding:12px;max-height:360px;overflow:auto}
+  .err{color:var(--err);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Sales Safari</h1>
+  <span class="sub">niche pain-mining, forum-first</span>
+  <nav class="nav"><a href="/sources">Sources</a></nav>
+</header>
+<main>
+  <div class="card">
+    <div class="field seedfield">
+      <label id="seedLabel">Seed URL, forum board, or topic</label>
+      <input id="seed" placeholder='https://forum.example.com/board — or a topic like "laser engraving"'>
+    </div>
+    <div class="optrow">
+      <div class="field" id="limitWrap">
+        <label title="How many forum topics to collect. A topic is one discussion thread, not one HTTP page. Each topic pulls all posts we can reach in that discussion. If you seed a single topic URL, the limit is effectively 1. 100000 is effectively unlimited — the collector stops on its own once the source (or, for Reddit, its ~1000-post-per-sort listing cap) runs dry.">Max topics</label>
+        <input id="limit" type="number" value="100000" min="1">
+      </div>
+      <div class="field" id="extractorWrap">
+        <label title="Stage-3 pain extractor. Claude CLI, or a local model via your OpenAI-compatible server (Ollama/LM Studio/vLLM). Local falls back to Claude if the endpoint is unreachable. Set base_url/model per model in config.yaml (extract.qwen / extract.glm).">Extractor</label>
+        <select id="extractor">
+          <option value="qwen" selected>Qwen (local)</option>
+          <option value="claude">Claude CLI</option>
+          <option value="glm">GLM (local)</option>
+        </select>
+      </div>
+      <div class="field" id="collectorWrap">
+        <label title="How to fetch this forum. Render = auto-pick XenForo/Playwright (no Firecrawl). Firecrawl = use Firecrawl only. Auto = Firecrawl + Playwright chain (choosing it approves Firecrawl). Reddit/Discourse are auto-detected regardless.">Collector</label>
+        <select id="collector">
+          <option value="render" selected>Render (XenForo/Playwright)</option>
+          <option value="firecrawl">Firecrawl</option>
+          <option value="auto">Auto (Firecrawl + Playwright)</option>
+        </select>
+      </div>
+      <div class="switchgroup">
+        <label class="toggle" id="corpusWrap" title="Collect and store a reusable corpus for this seed. Corpus mode stops after collection/storage and does not run extraction, clustering, or ideas.">
+          <span class="switch"><input id="corpus" type="checkbox"><span class="slider"></span></span>
+          Corpus mode
+        </label>
+        <label class="toggle" id="cooldownWrap" title="Reddit backfill rest breaks: work ~45 min then pause ~30 min to avoid bans. On = safe/slow. Off = continuous, faster, higher ban risk. No effect on non-Reddit collectors.">
+          <span class="switch"><input id="cooldown" type="checkbox"><span class="slider"></span></span>
+          Rest breaks
+        </label>
+        <label class="toggle" id="historicalWrap" title="Corpus mode only. Prefer older unseen Reddit threads instead of the normal refresh pass.">
+          <span class="switch"><input id="historical" type="checkbox"><span class="slider"></span></span>
+          Historical crawl
+        </label>
+        <label class="toggle" id="searchAssistWrap" title="Use Firecrawl web search to discover extra Reddit thread URLs before the old.reddit listing crawl. Uses Firecrawl credits.">
+          <span class="switch"><input id="searchAssist" type="checkbox"><span class="slider"></span></span>
+          Search assist
+        </label>
+      </div>
+    </div>
+    <div class="actionsrow">
+      <button id="run" title="A URL runs directly. A topic (no URL) searches the web for communities and validates real posters first.">Run</button>
+      <button id="stop" class="secondary warn" disabled title="Gracefully stop after the current unit of work finishes.">Stop</button>
+    </div>
+    <div class="help" id="modeHelp">Paste a forum/subreddit/thread URL to collect directly, or type a topic (like "laser engraving") to search the web for communities and validate real posters before running. Topic search uses Firecrawl.</div>
+    <div class="pipe" id="pipe"></div>
+  </div>
+
+  <div class="card" id="discoverCard" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <label style="margin:0">Discovered sources</label>
+      <div class="actions">
+        <span class="badge" id="discoverBadge">searching</span>
+        <button id="runSelected" class="secondary">Run selected</button>
+      </div>
+    </div>
+    <div class="help">Green <b>legit</b> = real people posting (distinct authors). Orange <b>weak</b> = forum-shaped but authorship unverified. Red <b>reject</b> = blog / SEO / product page — fails the real-poster check. Each ticked source runs as its own job.</div>
+    <table><thead><tr><th style="width:28px"><input type="checkbox" id="selAll" title="select/clear all runnable"></th><th>Source</th><th>Collector</th><th>Verdict</th><th>Signal</th><th>Why</th></tr></thead>
+    <tbody id="candidates"></tbody></table>
+  </div>
+
+  <div class="card" id="statusCard" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+      <div class="stats">
+        <div class="stat"><b id="sThreads">0</b><span>topics</span></div>
+        <div class="stat"><b id="sDocs">0</b><span>posts saved</span></div>
+        <div class="stat"><b id="sAuthors">0</b><span>authors</span></div>
+        <div class="stat"><b id="sPains">0</b><span>pains</span></div>
+        <div class="stat"><b id="sClusters">0</b><span>themes</span></div>
+        <div class="stat"><b id="sRanked">0</b><span>ranked</span></div>
+        <div class="stat"><b id="sIdeas">0</b><span>ideas</span></div>
+        <div class="stat"><b id="sTopicRate">0</b><span>topics / min</span></div>
+        <div class="stat"><b id="sPostRate">0</b><span>posts / min</span></div>
+        <div class="stat"><b id="sLastTopic">-</b><span>last topic</span></div>
+        <div class="stat" id="sRateLimitWrap" title="403/429 rate-limit responses hit during collection. The collector adaptively slows down each time and retries; a rising count means the forum is throttling you."><b id="sRateLimit">0</b><span>rate limits</span></div>
+      </div>
+      <span class="badge" id="badge">starting</span>
+    </div>
+    <div class="progwrap" id="progWrap">
+      <div class="proglabel"><b id="progName"></b><span id="progPct"></span></div>
+      <div class="progbar"><div class="progfill" id="progFill"></div></div>
+    </div>
+    <div class="small" id="currentUrlWrap" style="margin-top:10px;display:none">
+      Current URL:
+      <a id="currentUrl" href="#" target="_blank" rel="noopener noreferrer"></a>
+    </div>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div class="card" id="historyCard">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <label style="margin:0">Recent runs</label>
+      <div class="actions">
+        <input id="fSeed" placeholder="filter seed..." style="width:150px">
+        <select id="fStatus"><option value="">all status</option></select>
+        <button id="refreshRuns" class="secondary">Refresh</button>
+      </div>
+    </div>
+    <table><thead><tr><th>Run</th><th>Seed</th><th>Status</th><th>Updated</th><th>Counts</th><th></th></tr></thead>
+    <tbody id="runs"></tbody></table>
+    <div class="pager" id="runsPager">
+      <span class="dim" id="runsPageInfo"></span>
+      <div class="actions">
+        <button id="runsPrev" class="secondary">&larr; Prev</button>
+        <button id="runsNext" class="secondary">Next &rarr;</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="rankingsCard" style="display:none">
+    <label>Ranked themes</label>
+    <table><thead><tr><th>Rank</th><th>Theme</th><th>Score</th><th>Demand</th><th>Recur</th><th>Persist</th><th>Sat.</th><th>Authors</th></tr></thead>
+    <tbody id="rankings"></tbody></table>
+    <div class="solvlegend"><span><span class="solv yes"></span>software-solvable</span><span><span class="solv partial"></span>partial (needs hardware/service)</span><span><span class="solv no"></span>not software</span><span><span class="solv unknown"></span>unclassified</span></div>
+  </div>
+
+  <div class="card" id="ideasCard" style="display:none">
+    <label>Product ideas and kill tests</label>
+    <div class="grid" id="ideas"></div>
+  </div>
+
+  <div class="card" id="painsCard" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+      <label style="margin:0">Extracted pains <span class="dim" id="painsCount"></span></label>
+      <div class="actions">
+        <input id="pSearch" placeholder="filter text..." style="width:180px">
+        <select id="pPersona" style="width:150px"><option value="">all personas</option></select>
+        <select id="pTheme" style="width:190px"><option value="">all themes</option></select>
+      </div>
+    </div>
+    <div class="slicers" id="painSlicers">
+      <div class="slicergroup"><span class="lbl">Type</span>
+        <span class="chip" data-dim="type" data-val="complaint">Complaint</span>
+        <span class="chip" data-dim="type" data-val="workflow_pain">Workflow</span>
+        <span class="chip" data-dim="type" data-val="workaround">Workaround</span>
+        <span class="chip" data-dim="type" data-val="wish">Wish</span>
+      </div>
+      <div class="slicergroup"><span class="lbl">Solvable</span>
+        <span class="chip" data-dim="solv" data-val="yes">Yes</span>
+        <span class="chip" data-dim="solv" data-val="partial">Partial</span>
+        <span class="chip" data-dim="solv" data-val="no">No</span>
+        <span class="chip" data-dim="solv" data-val="_none">Unclassified</span>
+      </div>
+      <div class="slicergroup"><span class="lbl">Clustering</span>
+        <span class="chip" data-dim="clust" data-val="themed">Themed</span>
+        <span class="chip" data-dim="clust" data-val="unclustered">Unclustered</span>
+      </div>
+      <button id="pClear" class="secondary" style="padding:4px 12px;font-size:12px">Clear</button>
+    </div>
+    <table><thead><tr><th>Persona</th><th>Theme</th><th>Complaint / wish</th><th>Verbatim span</th><th>Source</th></tr></thead>
+    <tbody id="pains"></tbody></table>
+  </div>
+
+  <div class="card" id="reportCard" style="display:none">
+    <label>Markdown report</label>
+    <pre id="report"></pre>
+  </div>
+</main>
+
+<script>
+let RUNS=[], RUNS_TOTAL=0, RUN_PAGE_SIZE=25, RUN_OFFSET=0;
+const STEPS = ["collect","store","extract","embed","cluster","score","warnings","software fit","compete","rank","competitors","reviews","ideas","validate","report"];
+const STEP_FOR_STATUS = {
+  starting:0, collecting:0, "collecting-paused":0, storing:1,
+  extracting:2, personas:2, embedding:3, clustering:4, scoring:5,
+  filtering:6, "soft-filtering":7, competing:8, ranking:9,
+  "competitor-discovery":10, "review-mining":11, ideating:12,
+  validating:13, reporting:14, reported:14, done:14
+};
+const STEP_FOR_STAGE = {1:0,2:1,3:2,4:3,5:4,6:5,7:6,8:8,9:9,10:12,11:13,12:14};
+const STAGE_NAME = {1:"collect",2:"store",3:"extract",4:"embed",5:"cluster",6:"score",7:"warnings",8:"compete",9:"rank",10:"ideas",11:"validate",12:"report"};
+const STEP_DESC = {
+  collect:"Stage 1 — Scrape the community: pull posts and comments from the seed forum / subreddit (per-author where possible).",
+  store:"Stage 2 — Save canonical documents to SQLite, de-duplicated by URL and linked to this run.",
+  extract:"Stage 3 — LLM pulls pain signals from each post. Every pain must carry an exact verbatim quote as evidence.",
+  embed:"Stage 4 — Vectorize each pain with local bge embeddings so similar pains can be grouped.",
+  cluster:"Stage 5 — Group pains into themes (hdbscan), counting DISTINCT authors — one loud user is not a market.",
+  score:"Stage 6 — Demand score per theme: pain intensity, frequency, willingness-to-pay, reachability.",
+  filter:"Stage 7 - Advisory warning flags: SOC2/HIPAA, marketplace, closed API, regulated liability.",
+  compete:"Stage 8 — Competition signals: persistence (do complaints outlive incumbents?) and saturation (how crowded).",
+  rank:"Stage 9 — Rank = demand x persistence / (1+saturation) x solvable-weight. Competitors discovered here feed saturation.",
+  ideas:"Stage 10 — Generate product-idea stubs for the top-ranked themes.",
+  validate:"Stage 11 — One falsifiable kill-test per idea (metric, threshold, timeframe, channel).",
+  report:"Stage 12 — Markdown report with permalinked evidence.",
+};
+STEP_DESC.warnings = "Stage 7 - Advisory warning flags: SOC2/HIPAA, marketplace, closed API, regulated liability.";
+STEP_DESC["software fit"] = "Stage 7.5 - Soft filter: whether a pure software product can solve the theme.";
+STEP_DESC.score = "Stage 6 - Demand score: intensity, frequency, willingness-to-pay, reachability, recurrence.";
+STEP_DESC.rank = "Stage 9 - Rank = demand x persistence / (1+saturation) x solvable weight.";
+STEP_DESC.competitors = "Stage 9.5 - Discover existing products and backfill saturation before re-ranking.";
+STEP_DESC.reviews = "Stage 9.6 - Mine low-star competitor reviews for incumbent gaps.";
+const $ = id => document.getElementById(id);
+let poll = null;
+const TERMINAL = new Set(["done","error","cancelled","reported","interrupted"]);
+
+function esc(s){return String(s ?? "").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
+function n(x){return Number(x || 0).toFixed(2);}
+function solvClass(s){return ["yes","partial","no"].includes(s) ? s : "unknown";}
+function solvTitle(r){
+  if(!r.solvable) return "software-solvable: unclassified";
+  const c = r.solvable_confidence!=null ? ` (${Math.round(r.solvable_confidence*100)}% conf)` : "";
+  return `software-solvable: ${r.solvable}${c}${r.solvable_reason ? " — "+r.solvable_reason : ""}`;
+}
+function shortSeed(url){
+  try{
+    const u = new URL(url);
+    return u.host + u.pathname + u.search;
+  }catch{
+    return url || "";
+  }
+}
+function fmtWhen(s){
+  if(!s) return "-";
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toLocaleString();
+}
+function perMin(count, createdAt){
+  if(!createdAt) return "0";
+  const start = new Date(createdAt);
+  if(isNaN(start)) return "0";
+  const mins = Math.max((Date.now() - start.getTime()) / 60000, 1 / 60);
+  return (Number(count || 0) / mins).toFixed(1);
+}
+function fmtAgo(s){
+  if(!s) return "-";
+  const t = new Date(s);
+  if(isNaN(t)) return s;
+  const ms = Date.now() - t.getTime();
+  if(ms < 0) return "just now";
+  const sec = Math.floor(ms / 1000);
+  if(sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if(min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if(hr < 48) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+function setRunControls(status){
+  const active = status && !TERMINAL.has(status);
+  $("run").disabled = !!active;
+  $("stop").disabled = !active || status === "stopping";
+  $("stop").textContent = status === "stopping" ? "Stopping..." : "Stop";
+}
+function syncHistoricalToggles(){
+  const corpus = $("corpus").checked;
+  $("historicalWrap").style.display = corpus ? "" : "none";
+  $("searchAssistWrap").style.display = corpus ? "" : "none";
+  if(!corpus){
+    $("historical").checked = false;
+    $("searchAssist").checked = false;
+  }
+}
+function visualStatus(j){
+  if((j.note || "").startsWith("cooldown")) return "resting";
+  return j.status || "";
+}
+const COLLECT_PHASE_LABEL = {
+  "starting": "starting", "launching-browser": "starting browser", "browser-ready": "browser ready",
+  "cooldown": "rate-limit pause", "cooldown-done": "resuming", "goto": "loading page",
+  "listing": "finding threads", "loaded": "finding threads",
+  "sort-start": "starting filter", "sort-rotate": "switching filter",
+  "listing-stale-stop": "thread search done", "listing-nothing-new": "no new threads found",
+  "thread-start": "scraping post", "thread-done": "scraping post",
+};
+function statusText(j){
+  let txt = visualStatus(j);
+  if(j.corpus_mode) txt += ` / corpus-${j.corpus_mode}`;
+  else if(j.collector) txt += ` / ${j.collector}`;
+  const phaseLabel = j.status === "collecting" ? COLLECT_PHASE_LABEL[j.collection_phase] : null;
+  if(phaseLabel && j.note) txt += ` / ${phaseLabel} (${j.note})`;
+  else if(j.note) txt += ` / ${j.note}`;
+  if(j.persisted_only) txt += " / saved";
+  return txt;
+}
+function runOutcomeMsg(j){
+  if((j.pains||0) > 0 || (j.clusters||0) > 0 || (j.ideas||0) > 0 || j.report) return "";
+  if((j.stage||0) <= 2) return "This run finished after collection/storage only, so there are no extracted pains, ranked themes, ideas, or report for it.";
+  if((j.stage||0) >= 3 && (j.pains||0) === 0) return "This run reached analysis, but extraction produced no pains, so nothing downstream was generated.";
+  if((j.stage||0) >= 5 && (j.clusters||0) === 0) return "This run extracted pains, but clustering produced no themes, so there are no rankings or ideas.";
+  return "This run completed without downstream analysis artifacts to show.";
+}
+function renderProgress(j){
+  const p = j.progress;
+  const active = j.status && !TERMINAL.has(j.status);
+  if(!p || !active){ $("progWrap").style.display="none"; return; }
+  $("progWrap").style.display="block";
+  const idx = STEP_FOR_STATUS[j.status] ?? STEP_FOR_STAGE[p.stage];
+  const name = STEPS[idx] || STAGE_NAME[p.stage] || j.status;
+  const unit = p.unit || "";
+  if(p.total > 0 && p.pct != null){
+    $("progName").textContent = `${name} ${p.done}/${p.total} ${unit}`.trim();
+    $("progPct").textContent = `${p.pct}%`;
+    $("progFill").className = "progfill";
+    $("progFill").style.width = p.pct + "%";
+  }else{  // total unknown -> indeterminate sweep
+    $("progName").textContent = `${name} ${p.done} ${unit}`.trim();
+    $("progPct").textContent = "";
+    $("progFill").className = "progfill indet";
+    $("progFill").style.width = "";
+  }
+}
+function drawPipe(stage,status){
+  const cur = status==="done" ? (STEP_FOR_STAGE[stage] ?? 0) : (STEP_FOR_STATUS[status] ?? STEP_FOR_STAGE[stage] ?? 0);
+  const done = (status==="done" || status==="reported") ? Math.min(STEPS.length, cur + 1) : cur;
+  $("pipe").innerHTML = STEPS.map((s,i)=>{
+    let c="step"; if(i<done) c+=" done"; else if(i===cur && status && !TERMINAL.has(status)) c+=" now";
+    return `<span class="${c}" title="${esc(STEP_DESC[s]||'')}">${i+1}. ${s}</span>`;
+  }).join("");
+}
+drawPipe(1,"");
+setRunControls("");
+loadRuns();
+
+async function start(){
+  const seed=$("seed").value.trim(); if(!seed) return;
+  setRunControls("starting"); $("err").textContent="";
+  ["statusCard"].forEach(id=>$(id).style.display="block");
+  ["rankingsCard","ideasCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
+  $("badge").className="badge starting"; $("badge").textContent="starting";
+  const r=await fetch("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      seed_url:seed,
+      limit:parseInt($("limit").value)||null,
+      collector:$("collector").value,
+      use_corpus:$("corpus").checked,
+      historical:$("historical").checked,
+      search_assist:$("searchAssist").checked,
+      cooldown:$("cooldown").checked,
+      extractor:$("extractor").value
+    })});
+  const data=await r.json();
+  if(!r.ok){$("err").textContent=data.error||"run failed"; setRunControls(""); return;}
+  clearInterval(poll); poll=setInterval(()=>tick(data.job_id),1000); tick(data.job_id); RUN_OFFSET=0; loadRuns();
+}
+
+async function stopRun(){
+  const job = $("statusCard").dataset.jobId;
+  if(!job) return;
+  $("stop").disabled = true;
+  try{
+    const r = await fetch(`/api/run/${job}/stop`, {method:"POST"});
+    const data = await r.json();
+    if(!r.ok){
+      $("err").textContent = data.error || "stop failed";
+      setRunControls($("badge").textContent || "");
+      return;
+    }
+    $("err").textContent = "";
+    $("badge").className = "badge stopping";
+    $("badge").textContent = data.status || "stopping";
+    setRunControls("stopping");
+  }catch(e){
+    $("err").textContent = e?.message || "stop failed";
+    setRunControls($("badge").textContent || "");
+  }
+}
+
+async function tick(job){
+  $("statusCard").dataset.jobId = job;
+  const r=await fetch(`/api/status/${job}`); if(!r.ok) return;
+  const j=await r.json();
+  $("sThreads").textContent=j.threads ?? "-"; $("sDocs").textContent=j.new ?? 0;
+  $("sAuthors").textContent=j.authors ?? 0; $("sPains").textContent=j.pains ?? 0;
+  $("sClusters").textContent=j.clusters ?? 0; $("sRanked").textContent=j.ranked ?? 0;
+  $("sIdeas").textContent=j.ideas ?? 0;
+  $("sTopicRate").textContent=perMin(j.threads, j.created_at);
+  $("sPostRate").textContent=perMin(j.new, j.created_at);
+  $("sLastTopic").textContent=fmtAgo(j.last_topic_found_at);
+  $("sLastTopic").title=fmtWhen(j.last_topic_found_at);
+  if(j.current_url){
+    $("currentUrlWrap").style.display="block";
+    $("currentUrl").href=j.current_url;
+    $("currentUrl").textContent=shortSeed(j.current_url);
+    $("currentUrl").title=j.current_url;
+  }else{
+    $("currentUrlWrap").style.display="none";
+    $("currentUrl").removeAttribute("href");
+    $("currentUrl").textContent="";
+    $("currentUrl").title="";
+  }
+  const rl=j.rate_limit_hits ?? 0;
+  $("sRateLimit").textContent=rl;
+  $("sRateLimit").style.color = rl>0 ? "var(--err)" : "";
+  $("badge").className="badge "+visualStatus(j);
+  $("badge").textContent=statusText(j);
+  setRunControls(j.status);
+  drawPipe(j.stage,j.status);
+  renderProgress(j);
+  if(j.error) $("err").textContent=j.error;
+  if(TERMINAL.has(j.status)){
+    clearInterval(poll);
+    setRunControls(j.status);
+    if(j.status!=="error"){ loadRankings(job, j); loadIdeas(job, j); loadPains(job, j); loadReport(job, j); }
+    loadRuns();
+  }
+}
+
+async function loadRuns(){
+  const q=encodeURIComponent($("fSeed").value.trim()), st=encodeURIComponent($("fStatus").value);
+  const r=await (await fetch(`/api/runs?limit=${RUN_PAGE_SIZE}&offset=${RUN_OFFSET}&q=${q}&status=${st}`)).json();
+  RUNS=r.items; RUNS_TOTAL=r.total;
+  const sel=$("fStatus"), cur=sel.value;
+  const statuses=[...new Set(RUNS.map(r=>r.status))].sort();
+  sel.innerHTML=`<option value="">all status</option>`+statuses.map(s=>`<option${s===cur?" selected":""}>${esc(s)}</option>`).join("");
+  renderRuns();
+  renderRunsPager();
+}
+function renderRunsPager(){
+  const from = RUNS_TOTAL ? RUN_OFFSET + 1 : 0;
+  const to = Math.min(RUN_OFFSET + RUN_PAGE_SIZE, RUNS_TOTAL);
+  $("runsPageInfo").textContent = RUNS_TOTAL ? `${from}-${to} of ${RUNS_TOTAL}` : "no runs yet";
+  $("runsPrev").disabled = RUN_OFFSET <= 0;
+  $("runsNext").disabled = RUN_OFFSET + RUN_PAGE_SIZE >= RUNS_TOTAL;
+}
+
+function renderRuns(){
+  const rows=RUNS;
+  $("runs").innerHTML=rows.length ? rows.map(r=>`<tr>
+    <td class="dim"><code>${esc(r.job_id)}</code></td>
+    <td title="${esc(r.seed_url)}">${esc(shortSeed(r.seed_url))}</td>
+    <td><span class="badge ${esc(r.status)}">${esc(r.status)}</span></td>
+    <td class="dim">${esc(fmtWhen(r.updated_at || r.created_at))}</td>
+    <td class="dim">${esc(`${r.doc_count || 0} posts / ${r.pain_count || 0} pains / ${r.cluster_count || 0} themes / ${r.idea_count || 0} ideas`)}</td>
+    <td style="white-space:nowrap">
+      <button class="secondary" data-run="${esc(r.job_id)}">Open</button>
+      <button class="secondary warn" data-del="${esc(r.job_id)}" data-seed="${esc(shortSeed(r.seed_url))}" data-status="${esc(r.status)}">Delete</button>
+    </td>
+  </tr>`).join("") : `<tr><td colspan="6" class="dim">no runs match filter</td></tr>`;
+  document.querySelectorAll("#runs button[data-run]").forEach(btn=>{
+    btn.addEventListener("click",()=>openRun(btn.dataset.run));
+  });
+  document.querySelectorAll("#runs button[data-del]").forEach(btn=>{
+    btn.addEventListener("click",()=>deleteRun(btn.dataset.del,btn.dataset.seed,btn.dataset.status));
+  });
+}
+
+async function deleteRun(job,seed,status){
+  // Confirm only for reported runs (they carry a finished report worth protecting).
+  // Everything else deletes without a popup.
+  if(status==="reported" && !confirm(`Delete run ${job} (${seed})?\nRemoves all posts, pains, themes, ideas and its report. Cannot be undone.`)) return;
+  const res=await fetch(`/api/run/${job}`,{method:"DELETE"});
+  if(!res.ok){
+    const e=await res.json().catch(()=>({}));
+    alert(`Delete failed: ${e.error||res.status}`);
+    return;
+  }
+  if($("statusCard").dataset.jobId===job){
+    clearInterval(poll);
+    ["statusCard","rankingsCard","ideasCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
+  }
+  loadRuns();
+}
+
+async function openRun(job){
+  clearInterval(poll);
+  $("statusCard").dataset.jobId=job;
+  ["statusCard"].forEach(id=>$(id).style.display="block");
+  ["rankingsCard","ideasCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
+  $("err").textContent="";
+  await tick(job);
+  // Keep polling live if the run is still active; tick() clears the interval on a
+  // terminal status. Without this an opened (vs. freshly-started) run sat frozen.
+  clearInterval(poll);
+  poll=setInterval(()=>tick(job),1000);
+}
+
+function sourcesHtml(pains){
+  if(!pains || !pains.length) return "";
+  const items=pains.map(p=>{
+    const msg=p.complaint||p.wish||p.workflow_pain||p.verbatim_span||"";
+    const src=p.source_permalink;
+    const link=src?`<a href="${esc(src)}" target="_blank" rel="noopener">source</a>`:'<span class="dim">n/a</span>';
+    return `<li>${p.persona?`<b>${esc(p.persona)}:</b> `:""}${esc(msg.slice(0,180))} — ${link}</li>`;
+  }).join("");
+  return `<details class="srcs"><summary>${pains.length} source${pains.length>1?"s":""} / evidence</summary><ul>${items}</ul></details>`;
+}
+function warningHtml(flags){
+  if(!flags || !flags.length) return "";
+  return flags.map(f=>`<span class="warnflag" title="Advisory warning flag">${esc(f)}</span>`).join("");
+}
+function scoreBreakdownHtml(r){
+  const b = r.rank_breakdown || {};
+  const ev = r.scoring_evidence || {};
+  const rec = ev.recurrence || {};
+  const formula = `${n(b.demand ?? r.demand_score)} x ${n(b.persistence ?? r.persistence_score)} / (1 + ${n(b.saturation ?? r.saturation_score)}) x ${n(b.solvable_weight ?? r.solvable_weight ?? 1)}`;
+  const signals = dim => ((ev[dim] && ev[dim].signals) || []).slice(0,5).join(", ") || "none";
+  return `<details class="scorebits"><summary>score breakdown</summary>
+    <div><code>${esc(formula)}</code></div>
+    <div>Intensity ${n(r.pain_intensity)} (${esc(signals("pain_intensity"))})</div>
+    <div>Frequency ${n(r.frequency)} (${esc(rec.distinct_authors ?? r.distinct_authors)} authors / ${esc(rec.evidence_count ?? "-")} pains)</div>
+    <div>WTP ${n(r.willingness_to_pay)} (${esc(signals("willingness_to_pay"))})</div>
+    <div>Reach ${n(r.reachability)} (${esc(signals("reachability"))})</div>
+    <div>Recurrence ${n(r.recurrence_score)} (${esc(rec.distinct_sources ?? "-")} sources / ${esc(rec.workaround_count ?? "-")} workarounds)</div>
+  </details>`;
+}
+async function loadRankings(job, runState=null){
+  const [rows, details]=await Promise.all([
+    (await fetch(`/api/run/${job}/rankings`)).json(),
+    (await fetch(`/api/run/${job}/cluster-details`)).json(),
+  ]);
+  $("rankingsCard").style.display="block";
+  if(!rows.length){
+    const msg = runOutcomeMsg(runState || {});
+    $("rankings").innerHTML = `<tr><td colspan="8" class="dim">${esc(msg || "No ranked themes were produced for this run.")}</td></tr>`;
+    return;
+  }
+  const byCluster={};
+  (details||[]).forEach(c=>{ byCluster[c.id]=c.pains||[]; });
+  $("rankings").innerHTML=rows.map(r=>`<tr>
+    <td class="dim">${r.dropped ? "drop" : esc(r.rank)}</td>
+    <td><span class="solv ${solvClass(r.solvable)}" title="${esc(solvTitle(r))}"></span>${esc(r.label)}${warningHtml(r.filter_reasons)}${scoreBreakdownHtml(r)}${sourcesHtml(byCluster[r.cluster_id])}</td>
+    <td class="big">${n(r.rank_score)}</td><td>${n(r.demand_score)}</td>
+    <td>${n(r.recurrence_score)}</td><td>${n(r.persistence_score)}</td><td>${n(r.saturation_score)}</td>
+    <td class="big">${esc(r.distinct_authors)}</td></tr>`).join("");
+}
+
+function reviewsHtml(list){
+  if(!list || !list.length) return "";
+  const items = list.slice(0,10).map(r=>
+    `<li><span class="star">${"★".repeat(r.rating)}</span> ${r.title ? `<b>${esc(r.title)}</b> — ` : ""}${esc((r.body||"").slice(0,220))}</li>`
+  ).join("");
+  return `<details class="revs"><summary>${list.length} × 1–2★ complaints</summary><ul>${items}</ul></details>`;
+}
+function compHtml(list, revByComp){
+  if(!list || !list.length) return "";
+  const items = list.map(c=>{
+    const name = c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name);
+    const note = c.note ? ` <span class="dim">— ${esc(c.note)}</span>` : "";
+    const dom = c.review_domain ? ` <span class="dim">[${esc(c.review_domain)}]</span>` : "";
+    return `<li>${name}${note}${dom}${reviewsHtml(revByComp[c.id])}</li>`;
+  }).join("");
+  return `<div class="comps"><b>Competitors:</b><ul>${items}</ul></div>`;
+}
+async function loadIdeas(job, runState=null){
+  const [rows, comps, revs] = await Promise.all([
+    (await fetch(`/api/run/${job}/ideas`)).json(),
+    (await fetch(`/api/run/${job}/competitors`)).json(),
+    (await fetch(`/api/run/${job}/reviews`)).json(),
+  ]);
+  $("ideasCard").style.display="block";
+  if(!rows.length){
+    const msg = runOutcomeMsg(runState || {});
+    $("ideas").innerHTML = `<div class="dim">${esc(msg || "No ideas were generated for this run.")}</div>`;
+    return;
+  }
+  const byCluster = {}, revByComp = {};
+  (comps||[]).forEach(c=>{ (byCluster[c.cluster_id] ||= []).push(c); });
+  (revs||[]).forEach(r=>{ (revByComp[r.competitor_id] ||= []).push(r); });
+  $("ideasCard").style.display="block";
+  $("ideas").innerHTML=rows.map(i=>`<div class="idea">
+    <h3>${esc(i.title)}</h3><p>${esc(i.pitch)}</p>
+    <div class="test"><b>Kill test:</b> ${esc(i.kill_test)}<br>
+    <b>Metric:</b> ${esc(i.metric)}<br><b>Threshold:</b> ${esc(i.threshold)}</div>
+    ${compHtml(byCluster[i.cluster_id], revByComp)}
+    ${i.evidence_permalink ? `<p><a href="${esc(i.evidence_permalink)}" target="_blank" rel="noopener">evidence</a></p>` : ""}
+  </div>`).join("");
+}
+
+let PAINS=[];
+function setPainFilters(on){
+  document.querySelectorAll("#painsCard .actions, #painSlicers")
+    .forEach(el=>el.classList.toggle("filters-off", !on));
+}
+async function loadPains(job, runState=null){
+  PAINS=await (await fetch(`/api/run/${job}/pains?limit=0`)).json();
+  setPainFilters(PAINS.length>0);   // gray out filters/slicers until there are pains
+  $("painsCard").style.display="block";
+  if(!PAINS.length){
+    $("painsCount").textContent = "";
+    $("pains").innerHTML = `<tr><td colspan="5" class="dim">${esc(runOutcomeMsg(runState || {}) || "No pains were extracted for this run.")}</td></tr>`;
+    return;
+  }
+  const personas=[...new Set(PAINS.map(p=>p.persona_canonical||p.persona).filter(Boolean))].sort();
+  const themes=[...new Set(PAINS.map(p=>p.theme).filter(Boolean))].sort();
+  const pv=$("pPersona").value, tv=$("pTheme").value;
+  $("pPersona").innerHTML=`<option value="">all personas</option>`+personas.map(x=>`<option${x===pv?" selected":""}>${esc(x)}</option>`).join("");
+  $("pTheme").innerHTML=`<option value="">all themes</option>`+themes.map(x=>`<option${x===tv?" selected":""}>${esc(x)}</option>`).join("");
+  renderPains();
+}
+const SLICERS={type:new Set(),solv:new Set(),clust:new Set()};
+function painMatchesSlicers(p){
+  if(SLICERS.type.size && ![...SLICERS.type].some(t=>(p[t]||"").trim())) return false;
+  if(SLICERS.solv.size && !SLICERS.solv.has(p.solvable||"_none")) return false;
+  if(SLICERS.clust.size && !SLICERS.clust.has(p.theme?"themed":"unclustered")) return false;
+  return true;
+}
+function toggleChip(el){
+  const s=SLICERS[el.dataset.dim];
+  if(s.has(el.dataset.val)) s.delete(el.dataset.val); else s.add(el.dataset.val);
+  el.classList.toggle("on", s.has(el.dataset.val));
+  renderPains();
+}
+function clearPainFilters(){
+  $("pSearch").value=""; $("pPersona").value=""; $("pTheme").value="";
+  Object.values(SLICERS).forEach(s=>s.clear());
+  document.querySelectorAll("#painSlicers .chip").forEach(c=>c.classList.remove("on"));
+  renderPains();
+}
+function renderPains(){
+  const q=$("pSearch").value.trim().toLowerCase();
+  const per=$("pPersona").value, th=$("pTheme").value;
+  const rows=PAINS.filter(p=>{
+    if(per && (p.persona_canonical||p.persona)!==per) return false;
+    if(th && p.theme!==th) return false;
+    if(!painMatchesSlicers(p)) return false;
+    if(q){
+      const hay=`${p.complaint||""} ${p.wish||""} ${p.workflow_pain||""} ${p.workaround||""} ${p.span||""} ${p.persona||""} ${p.persona_canonical||""} ${p.theme||""}`.toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  $("painsCount").textContent=`— ${rows.length} of ${PAINS.length}`;
+  $("pains").innerHTML=rows.length ? rows.map(p=>{
+    const msg=p.complaint||p.wish||p.workflow_pain||p.workaround||"";
+    const span=p.span||"", source=p.source||"";
+    const seg=p.persona_canonical||p.persona||"-";
+    const raw=(p.persona && p.persona!==seg) ? `<br><span class="dim" style="font-size:11px">${esc(p.persona)}</span>` : "";
+    return `<tr><td>${esc(seg)}${raw}</td>
+      <td class="dim"><span class="solv ${solvClass(p.solvable)}" title="software-solvable: ${esc(p.solvable||"unclassified")}"></span>${esc(p.theme||"-")}</td>
+      <td>${esc(msg)}</td>
+      <td class="quote">"${esc(span)}"</td>
+      <td>${source ? `<a href="${esc(source)}" target="_blank" rel="noopener">Open source</a>` : '<span class="dim">n/a</span>'}</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="dim">no pains match filter</td></tr>`;
+}
+
+async function loadReport(job, runState=null){
+  const r=await fetch(`/api/run/${job}/report`);
+  $("reportCard").style.display="block";
+  if(!r.ok){
+    $("report").textContent = runOutcomeMsg(runState || {}) || "No Markdown report was generated for this run.";
+    return;
+  }
+  $("report").textContent=await r.text();
+}
+
+// ---- Seed autodetect: a URL runs directly, anything else is treated as a topic
+// (search for communities, validate real posters, then run the picks) ----
+let dpoll=null;
+function looksLikeUrl(s){
+  try{ const u=new URL(s); return u.protocol==="http:"||u.protocol==="https:"; }catch{ return false; }
+}
+async function runOrDiscover(){
+  const seed=$("seed").value.trim(); if(!seed) return;
+  if($("corpus").checked || looksLikeUrl(seed)) await start();
+  else await startDiscover();
+}
+
+function syncCorpusMode(){
+  const corpus=$("corpus").checked;
+  $("runSelected").disabled=corpus;
+  $("limit").disabled=corpus;
+  $("limitWrap").style.display=corpus?"none":"";
+  if(corpus){
+    $("discoverCard").style.display="none";
+    $("seedLabel").textContent="Subreddit or forum URL";
+    $("modeHelp").textContent="Corpus mode is single-source only. It collects and stores posts for one subreddit/forum seed, then stops before extraction, clustering, and ideas. Historical crawl digs for older unseen Reddit threads; Search assist uses Firecrawl to discover extra Reddit permalinks first.";
+  }else{
+    $("seedLabel").textContent="Seed URL, forum board, or topic";
+    $("modeHelp").textContent='Paste a forum/subreddit/thread URL to collect directly, or type a topic (like "laser engraving") to search the web for communities and validate real posters before running. Topic search uses Firecrawl.';
+  }
+  syncHistoricalToggles();
+}
+
+const VERDICT_CLASS={legit:"done",weak:"scoring",reject:"error",error:"error",pending:"starting"};
+function signalText(c){
+  if(c.authored) return `${c.distinct_authors} authors / ${c.sample_docs} sampled`;
+  if(c.collector) return `${c.thread_count} threads`;
+  return "-";
+}
+function renderCandidates(list){
+  if(!list.length){ $("candidates").innerHTML=`<tr><td colspan="6" class="dim">searching…</td></tr>`; return; }
+  $("candidates").innerHTML=list.map(c=>{
+    const sel=c.verdict==="legit";
+    const dis=["reject","error","pending"].includes(c.verdict);
+    return `<tr>
+      <td><input type="checkbox" class="candchk" data-url="${esc(c.url)}" ${sel?"checked":""} ${dis?"disabled":""}></td>
+      <td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title||shortSeed(c.url))}</a><br><span class="dim">${esc(shortSeed(c.url))}</span></td>
+      <td class="dim">${esc(c.collector||"-")}</td>
+      <td><span class="badge ${VERDICT_CLASS[c.verdict]||"starting"}">${esc(c.verdict)}</span></td>
+      <td class="dim">${esc(signalText(c))}</td>
+      <td class="dim">${esc(c.reason||"")}</td>
+    </tr>`;
+  }).join("");
+  $("selAll").onclick=()=>document.querySelectorAll(".candchk:not(:disabled)").forEach(cb=>cb.checked=$("selAll").checked);
+}
+
+async function startDiscover(){
+  if($("corpus").checked){
+    $("err").textContent="Corpus mode runs one source directly; discovery and multi-select are off.";
+    return;
+  }
+  const topic=$("seed").value.trim(); if(!topic) return;
+  $("collector").value="firecrawl";
+  $("run").disabled=true; $("err").textContent="";
+  $("discoverCard").style.display="block";
+  $("candidates").innerHTML=`<tr><td colspan="6" class="dim">searching…</td></tr>`;
+  $("discoverBadge").className="badge collecting"; $("discoverBadge").textContent="searching";
+  const r=await fetch("/api/discover",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({topic, use_firecrawl:true})});
+  const data=await r.json();
+  if(!r.ok){ $("err").textContent=data.error||"discover failed"; $("run").disabled=false; return; }
+  clearInterval(dpoll); dpoll=setInterval(()=>dtick(data.discover_id),1000); dtick(data.discover_id);
+}
+async function dtick(did){
+  const r=await fetch(`/api/discover/${did}`); if(!r.ok) return;
+  const d=await r.json();
+  const cls=d.status==="done"?"done":d.status==="error"?"error":"collecting";
+  const cnt=(d.status==="validating"&&d.candidates&&d.candidates.length)?` ${d.validated||0}/${d.candidates.length}`:"";
+  $("discoverBadge").className="badge "+cls; $("discoverBadge").textContent=d.status+cnt;
+  renderCandidates(d.candidates||[]);
+  if(d.error) $("err").textContent=d.error;
+  if(d.status==="done"||d.status==="error"){ clearInterval(dpoll); $("run").disabled=false; }
+}
+async function runSelected(){
+  if($("corpus").checked){
+    $("err").textContent="Corpus mode runs one source directly; use Run with a subreddit/forum URL.";
+    return;
+  }
+  const urls=[...document.querySelectorAll(".candchk:checked")].map(cb=>cb.dataset.url);
+  if(!urls.length){ $("err").textContent="select at least one source to run"; return; }
+  $("runSelected").disabled=true; $("err").textContent="";
+  let first=null;
+  for(const url of urls){
+    const r=await fetch("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({seed_url:url, limit:parseInt($("limit").value)||null,
+        collector:$("collector").value,
+        use_corpus:$("corpus").checked,
+        cooldown:$("cooldown").checked,
+        extractor:$("extractor").value})});
+    const data=await r.json();
+    if(r.ok && !first) first=data.job_id;
+  }
+  $("runSelected").disabled=false;
+  RUN_OFFSET=0; await loadRuns();
+  if(first){ ["statusCard"].forEach(id=>$(id).style.display="block");
+    openRun(first); clearInterval(poll); poll=setInterval(()=>tick(first),1000); tick(first); }
+}
+
+$("run").addEventListener("click",runOrDiscover);
+$("runSelected").addEventListener("click",runSelected);
+$("corpus").addEventListener("change",syncCorpusMode);
+$("corpus").addEventListener("change",syncHistoricalToggles);
+$("stop").addEventListener("click",stopRun);
+$("refreshRuns").addEventListener("click",loadRuns);
+$("runsPrev").addEventListener("click",()=>{ RUN_OFFSET=Math.max(0,RUN_OFFSET-RUN_PAGE_SIZE); loadRuns(); });
+$("runsNext").addEventListener("click",()=>{ RUN_OFFSET+=RUN_PAGE_SIZE; loadRuns(); });
+let fSeedDebounce=null;
+$("fSeed").addEventListener("input",()=>{
+  clearTimeout(fSeedDebounce);
+  fSeedDebounce=setTimeout(()=>{ RUN_OFFSET=0; loadRuns(); },300);
+});
+$("fStatus").addEventListener("change",()=>{ RUN_OFFSET=0; loadRuns(); });
+$("pSearch").addEventListener("input",renderPains);
+$("pPersona").addEventListener("change",renderPains);
+$("pTheme").addEventListener("change",renderPains);
+document.querySelectorAll("#painSlicers .chip").forEach(c=>c.addEventListener("click",()=>toggleChip(c)));
+$("pClear").addEventListener("click",clearPainFilters);
+syncCorpusMode();
+syncHistoricalToggles();
+</script>
+</body>
+</html>
