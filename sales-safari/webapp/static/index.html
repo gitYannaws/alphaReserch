@@ -135,7 +135,8 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
       <div class="field" id="extractorWrap">
         <label title="Stage-3 pain extractor. Claude CLI, or a local model via your OpenAI-compatible server (Ollama/LM Studio/vLLM). Local falls back to Claude if the endpoint is unreachable. Set base_url/model per model in config.yaml (extract.qwen / extract.glm).">Extractor</label>
         <select id="extractor">
-          <option value="qwen" selected>Qwen (local)</option>
+          <option value="qwen" selected>Qwen 2.5 14B (local)</option>
+          <option value="qwen3">Qwen3 14B (local)</option>
           <option value="claude">Claude CLI</option>
           <option value="glm">GLM (local)</option>
         </select>

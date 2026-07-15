@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS runs(
   historical INTEGER DEFAULT 0,
   search_assist INTEGER DEFAULT 0,
   extractor TEXT,
+  extract_provider TEXT,
+  extract_model TEXT,
+  extract_base_url TEXT,
+  extract_config_json TEXT,
+  prompt_version TEXT,
   inherited_doc_count INTEGER DEFAULT 0,
   inherited_topic_count INTEGER DEFAULT 0,
   inherited_author_count INTEGER DEFAULT 0,
@@ -297,6 +302,11 @@ def _migrate(conn):
     _ensure_column(conn, "runs", "historical", "historical INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "search_assist", "search_assist INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "extractor", "extractor TEXT")
+    _ensure_column(conn, "runs", "extract_provider", "extract_provider TEXT")
+    _ensure_column(conn, "runs", "extract_model", "extract_model TEXT")
+    _ensure_column(conn, "runs", "extract_base_url", "extract_base_url TEXT")
+    _ensure_column(conn, "runs", "extract_config_json", "extract_config_json TEXT")
+    _ensure_column(conn, "runs", "prompt_version", "prompt_version TEXT")
     _ensure_column(conn, "runs", "inherited_doc_count", "inherited_doc_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_topic_count", "inherited_topic_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_author_count", "inherited_author_count INTEGER DEFAULT 0")
@@ -321,17 +331,22 @@ class Store:
     def start_run(self, run_id: str, seed_url: str, use_render: bool = False,
                   use_firecrawl: bool = False, use_corpus: bool = False,
                   extractor: str | None = None, historical: bool = False,
-                  search_assist: bool = False):
+                  search_assist: bool = False, extract_provider: str | None = None,
+                  extract_model: str | None = None, extract_base_url: str | None = None,
+                  extract_config_json: str | None = None,
+                  prompt_version: str | None = None):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT OR REPLACE INTO runs("
             "job_id,seed_url,stage,status,error,note,use_render,use_firecrawl,use_corpus,historical,search_assist,extractor,"
+            "extract_provider,extract_model,extract_base_url,extract_config_json,prompt_version,"
             "inherited_doc_count,inherited_topic_count,inherited_author_count,last_topic_found_at,updated_at,created_at"
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, seed_url, 1, "collecting", None, None, int(bool(use_render)),
              int(bool(use_firecrawl)), int(bool(use_corpus)), int(bool(historical)),
-             int(bool(search_assist)), extractor, 0, 0, 0, None, now, now))
+             int(bool(search_assist)), extractor, extract_provider, extract_model,
+             extract_base_url, extract_config_json, prompt_version, 0, 0, 0, None, now, now))
         self.conn.commit()
 
     def set_run_inherited_counts(self, run_id: str, docs: int, topics: int, authors: int):
@@ -413,7 +428,9 @@ class Store:
 
     def get_run(self, run_id: str):
         cols = ["job_id", "seed_url", "stage", "status", "error", "note", "use_render",
-                "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor", "inherited_doc_count",
+                "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor",
+                "extract_provider", "extract_model", "extract_base_url", "extract_config_json",
+                "prompt_version", "inherited_doc_count",
                 "inherited_topic_count", "inherited_author_count", "last_topic_found_at",
                 "updated_at", "created_at"]
         row = self.conn.execute(f"SELECT {','.join(cols)} FROM runs WHERE job_id=?", (run_id,)).fetchone()
@@ -424,7 +441,9 @@ class Store:
             return []
         placeholders = ",".join("?" for _ in statuses)
         cols = ["job_id", "seed_url", "stage", "status", "error", "note", "use_render",
-                "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor", "inherited_doc_count",
+                "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor",
+                "extract_provider", "extract_model", "extract_base_url", "extract_config_json",
+                "prompt_version", "inherited_doc_count",
                 "inherited_topic_count", "inherited_author_count", "last_topic_found_at",
                 "updated_at", "created_at"]
         rows = self.conn.execute(
@@ -445,6 +464,7 @@ class Store:
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         rows = self.conn.execute(
             "SELECT r.job_id, r.seed_url, r.stage, r.status, r.error, r.note, r.created_at, r.updated_at, "
+            "r.extractor, r.extract_provider, r.extract_model, r.prompt_version, "
             "MAX(0, (SELECT COUNT(*) FROM run_documents rd WHERE rd.run_id=r.job_id) - "
             "CASE WHEN COALESCE(r.use_corpus,0)=1 THEN COALESCE(r.inherited_doc_count,0) ELSE 0 END) AS doc_count, "
             "(SELECT COUNT(*) FROM pains p WHERE p.run_id=r.job_id) AS pain_count, "
@@ -457,6 +477,7 @@ class Store:
             (*params, limit, offset),
         ).fetchall()
         cols = ["job_id", "seed_url", "stage", "status", "error", "note", "created_at", "updated_at",
+                "extractor", "extract_provider", "extract_model", "prompt_version",
                 "doc_count", "pain_count", "cluster_count", "idea_count", "report_path"]
         return [dict(zip(cols, row)) for row in rows]
 

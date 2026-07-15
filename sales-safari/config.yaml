@@ -64,7 +64,8 @@ keywords: []
 # §3 pain extraction
 # providers = ordered try-list. First that succeeds wins; a fallback-eligible error
 # (see fallback_on) advances to the next. The GUI "Extractor" dropdown overrides this
-# per-run: Claude -> [claude, codex]; Qwen -> [qwen, claude]; GLM -> [glm, claude].
+# per-run: Claude -> [claude, codex]; Qwen 2.5 -> [qwen, claude];
+# Qwen3 -> [qwen3, claude]; GLM -> [glm, claude].
 extract:
   batch_size: 6
   providers: [qwen, claude]   # local qwen primary; Claude fallback if endpoint down/errors
@@ -81,6 +82,11 @@ extract:
     base_url: http://localhost:11434/v1   # Ollama default (LM Studio :1234/v1, vLLM :8000/v1)
     model: qwen2.5:14b-instruct           # ~9GB Q4, fits 16GB VRAM; `ollama list` for options
     api_key: ""                           # blank ok for local; Ollama ignores it
+    temperature: 0
+  qwen3:
+    base_url: http://localhost:11434/v1
+    model: qwen3:14b
+    api_key: ""
     temperature: 0
   glm:
     base_url: http://localhost:11434/v1

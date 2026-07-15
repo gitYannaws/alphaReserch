@@ -17,6 +17,7 @@ def _signals(row, dim):
 def report_run(store, run_id: str, out_dir: str = "reports", progress=None) -> dict:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     report_path = Path(out_dir) / f"{run_id}.md"
+    run = store.get_run(run_id) or {}
     ranked = store.get_ranked_clusters(run_id, include_dropped=True)
     ideas = store.get_ideas(run_id)
     total = len(ranked) + len(ideas) + 1
@@ -53,9 +54,19 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None) -> d
     lines = [
         f"# Sales Safari Report - {run_id}",
         "",
-        "## Ranked Themes",
-        "",
     ]
+    meta = []
+    if run.get("extract_provider") or run.get("extractor"):
+        meta.append(f"- Extractor: {run.get('extract_provider') or run.get('extractor')}")
+    if run.get("extract_model"):
+        meta.append(f"- Extract model: {run['extract_model']}")
+    if run.get("extract_base_url"):
+        meta.append(f"- Extract base URL: {run['extract_base_url']}")
+    if run.get("prompt_version"):
+        meta.append(f"- Prompt version: {run['prompt_version']}")
+    if meta:
+        lines.extend(["## Run Metadata", "", *meta, ""])
+    lines.extend(["## Ranked Themes", ""])
     if not ranked:
         lines.extend([
             "No ranked themes were produced for this run.",

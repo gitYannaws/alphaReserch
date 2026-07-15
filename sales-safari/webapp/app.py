@@ -2,6 +2,7 @@
 
 Run: .venv/Scripts/python -m uvicorn webapp.app:app --port 8000
 """
+import json
 import os
 import re
 import subprocess
@@ -43,7 +44,8 @@ JOBS: dict = {}  # job_id -> live progress dict
 DISCOVERIES: dict = {}  # discover_id -> live topic-discovery state
 KICKOFFS: dict = {}  # kickoff_id -> live sequential-queue progress
 KICKOFF_MIN, KICKOFF_MAX = 3, 15
-ACTIVE_RUN_STATUSES = {"starting", "collecting", "storing", "extracting", "embedding",
+ACTIVE_RUN_STATUSES = {"starting", "collecting", "collecting-paused", "storing",
+                       "extracting", "personas", "embedding",
                        "clustering", "scoring", "filtering", "soft-filtering", "competing",
                        "competitor-discovery", "review-mining", "ranking", "ideating",
                        "validating", "reporting", "stopping", "recovering"}
@@ -67,7 +69,7 @@ class RunReq(BaseModel):
     historical: bool = False      # corpus mode: favor older unseen threads, not refresh
     search_assist: bool = False   # Firecrawl web-search extra Reddit thread URLs before listing walk
     cooldown: bool = True          # Reddit backfill rest breaks (45m work / 30m pause); off = faster, riskier
-    extractor: Optional[str] = None  # None/"claude" | "qwen" | "glm" -> stage-3 provider
+    extractor: Optional[str] = None  # None/"claude" | "qwen" | "qwen3" | "glm" -> stage-3 provider
 
 
 def _collector_to_toggles(collector: Optional[str]) -> tuple[bool, bool]:
@@ -87,11 +89,25 @@ def _collector_to_toggles(collector: Optional[str]) -> tuple[bool, bool]:
 def _extractor_providers(name):
     """Map the GUI extractor choice to a provider try-list. Local models fall back to
     Claude if the local endpoint is down. None -> keep config default."""
-    if name in ("qwen", "glm", "local"):
+    if name in ("qwen", "qwen3", "glm", "local"):
         return [name, "claude"]
     if name == "claude":
         return ["claude", "codex"]
     return None
+
+
+def _extract_provenance(run_cfg: dict, extractor: Optional[str]) -> dict:
+    providers = _extractor_providers(extractor) or (run_cfg.get("extract", {}).get("providers") or [])
+    provider = providers[0] if providers else (extractor or "")
+    provider_cfg = dict(run_cfg.get("extract", {}).get(provider, {}) or {})
+    frozen = {k: v for k, v in provider_cfg.items() if k != "api_key"}
+    return {
+        "extract_provider": provider,
+        "extract_model": provider_cfg.get("model") or run_cfg.get("extract", {}).get("claude_model"),
+        "extract_base_url": provider_cfg.get("base_url"),
+        "extract_config_json": json.dumps(frozen, sort_keys=True),
+        "prompt_version": "extract-v1",
+    }
 
 
 class DiscoverReq(BaseModel):
@@ -116,6 +132,12 @@ class KickoffReq(BaseModel):
     search_assist: bool = False
     cooldown: bool = True          # Reddit backfill rest breaks; off = faster, riskier
     extractor: Optional[str] = None
+
+
+class MergeAnalyzeReq(BaseModel):
+    source_ids: list[str]
+    extractor: Optional[str] = None
+    label: Optional[str] = None
 
 
 def _check_cancelled(job: dict):
@@ -407,7 +429,8 @@ def _worker(job_id: str, seed: str, limit: int, use_render: bool, use_firecrawl:
         store.start_run(job_id, seed, use_render=use_render, use_firecrawl=use_firecrawl,
                         use_corpus=use_corpus, extractor=extractor,
                         historical=bool(job.get("historical")),
-                        search_assist=bool(job.get("search_assist")))
+                        search_assist=bool(job.get("search_assist")),
+                        **_extract_provenance(run_cfg, extractor))
         _set_stage_progress(1, 0, 0, "")
 
         def _s1_collect():
@@ -633,7 +656,7 @@ def subreddits_page():
 
 @app.get("/sources", response_class=HTMLResponse)
 def sources_page():
-    return SOURCES
+    return (BASE / "static" / "sources.html").read_text(encoding="utf-8")
 
 
 @app.post("/api/discover")
@@ -703,10 +726,59 @@ def _analyze_worker(job_id: str, corpus_key: str, seed: str, extractor: Optional
             run_cfg["extract"]["providers"] = providers
         job.update(status="extracting", stage=3, corpus_key=corpus_key,
                    collector=f"analyze:{corpus_key}")
-        store.start_run(job_id, seed, use_corpus=True, extractor=extractor)
+        store.start_run(job_id, seed, use_corpus=True, extractor=extractor,
+                        **_extract_provenance(run_cfg, extractor))
         store.link_run_to_corpus(job_id, corpus_key)
         if store.count_documents(job_id) == 0:
             raise RuntimeError(f"corpus {corpus_key} has no collected documents to analyze.")
+        _analyze_stages(job, job_id, store, run_cfg)
+    except RunCancelled as e:
+        job.update(status="cancelled", error=str(e), stop_requested=False)
+        if store:
+            store.cancel_run(job_id, job.get("stage", 3), str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        job.update(status="error", error=str(e))
+        if store:
+            try:
+                store.fail_run(job_id, job.get("stage", 3), str(e))
+            except Exception:
+                traceback.print_exc()
+    finally:
+        if store:
+            store.close()
+
+
+def _merge_analyze_worker(job_id: str, sources: list[dict], extractor: Optional[str] = None,
+                          label: Optional[str] = None):
+    """Analyze selected corpora as one merged run, producing one combined report."""
+    job = JOBS[job_id]
+    store = None
+    seed = label or "merged:" + ",".join(s.get("corpus_key") or s["url"] for s in sources)
+    try:
+        store = Store(DB)
+        run_cfg = _run_config(sources[0]["url"], False, False)
+        providers = _extractor_providers(extractor)
+        if providers:
+            run_cfg["extract"] = dict(run_cfg.get("extract", {}))
+            run_cfg["extract"]["providers"] = providers
+        job.update(status="extracting", stage=3, collector="analyze:merged",
+                   corpus_key=",".join(s.get("corpus_key") or s["url"] for s in sources))
+        store.start_run(job_id, seed, use_corpus=True, extractor=extractor,
+                        **_extract_provenance(run_cfg, extractor))
+        linked = 0
+        for src in sources:
+            corpus_key = src.get("corpus_key")
+            if not corpus_key:
+                continue
+            linked += store.link_run_to_corpus(job_id, corpus_key)
+        if store.count_documents(job_id) == 0:
+            raise RuntimeError("selected sources have no collected documents to analyze.")
+        job.update(new=store.count_documents(job_id),
+                   threads=store.count_topics(job_id),
+                   authors=store.count_distinct_authors(job_id),
+                   merged_sources=len(sources), linked_documents=linked)
         _analyze_stages(job, job_id, store, run_cfg)
     except RunCancelled as e:
         job.update(status="cancelled", error=str(e), stop_requested=False)
@@ -794,6 +866,14 @@ def _kickoff_worker(kickoff_id: str, sources: list[dict], mode: str, use_render:
                 kickoff["status"] = "stopped"
                 return
             seed = src["url"]
+            items = kickoff.setdefault("items", [])
+            if i < len(items):
+                item = items[i]
+            else:
+                item = dict(source_id=src["id"], seed=seed, label=src.get("label"),
+                            corpus_key=src.get("corpus_key"), status="queued",
+                            job_id=None, stage=None, error=None)
+                items.append(item)
             kickoff["current_index"] = i
             kickoff["current_source"] = src.get("label") or seed
             store.mark_source_queued(src["id"])
@@ -804,14 +884,21 @@ def _kickoff_worker(kickoff_id: str, sources: list[dict], mode: str, use_render:
                                               historical, search_assist)
                     kickoff["current_job_id"] = job_id
                     kickoff["job_ids"].append(job_id)
+                    item.update(status="running", job_id=job_id)
                     _analyze_worker(job_id, corpus_key, seed, extractor)
                 else:
                     job_id, limit = _register_job(seed, use_render, use_firecrawl, use_corpus,
                                                   extractor, cooldown, historical, search_assist)
                     kickoff["current_job_id"] = job_id
                     kickoff["job_ids"].append(job_id)
+                    item.update(status="running", job_id=job_id)
                     _worker(job_id, seed, limit, use_render, use_firecrawl, extractor, use_corpus)
+                final_job = JOBS.get(job_id, {})
+                item.update(status=final_job.get("status", "done"),
+                            stage=final_job.get("stage"),
+                            error=final_job.get("error"))
             except Exception as e:
+                item.update(status="error", error=str(e))
                 print(f"[kickoff] {kickoff_id} ({mode}) source {seed} failed: {e}", flush=True)
             kickoff["done"] = i + 1
         kickoff["status"] = "done"
@@ -846,8 +933,14 @@ def kickoff_sources(req: KickoffReq):
         use_render, use_firecrawl = req.use_render, req.use_firecrawl
     kickoff_id = uuid.uuid4().hex[:12]
     KICKOFFS[kickoff_id] = dict(kickoff_id=kickoff_id, mode=mode, total=len(sources), done=0,
-                               current_index=None, current_source=None, current_job_id=None,
-                               job_ids=[], status="running", stop_requested=False)
+                                current_index=None, current_source=None, current_job_id=None,
+                                job_ids=[], status="running", stop_requested=False,
+                                items=[dict(source_id=s["id"], seed=s["url"],
+                                            label=s.get("label"),
+                                            corpus_key=s.get("corpus_key"),
+                                            status="queued", job_id=None,
+                                            stage=None, error=None)
+                                       for s in sources])
     threading.Thread(target=_kickoff_worker,
                      args=(kickoff_id, sources, mode, use_render, use_firecrawl,
                            req.use_corpus, req.extractor, req.cooldown,
@@ -855,12 +948,126 @@ def kickoff_sources(req: KickoffReq):
     return {"kickoff_id": kickoff_id}
 
 
+@app.post("/api/sources/merge-analyze")
+def merge_analyze_sources(req: MergeAnalyzeReq):
+    ids = list(dict.fromkeys(req.source_ids))
+    if not (2 <= len(ids) <= KICKOFF_MAX):
+        return JSONResponse(
+            {"error": f"pick between 2 and {KICKOFF_MAX} sources to merge (got {len(ids)})"},
+            status_code=400)
+    store = Store(DB)
+    try:
+        sources = []
+        missing = []
+        empty = []
+        for sid in ids:
+            src = store.get_source(sid)
+            if not src:
+                missing.append(sid)
+                continue
+            if not src.get("corpus_key"):
+                return JSONResponse({"error": f"source {sid} has no corpus key"}, status_code=400)
+            if store.count_corpus_documents(src["corpus_key"]) == 0:
+                empty.append(src["corpus_key"])
+            sources.append(src)
+        if missing:
+            return JSONResponse({"error": f"unknown source(s): {', '.join(missing)}"}, status_code=404)
+        if empty:
+            return JSONResponse({"error": f"empty corpus/corpora: {', '.join(empty)}"}, status_code=400)
+    finally:
+        store.close()
+
+    label = (req.label or "").strip()
+    if not label:
+        label = "merged:" + "+".join(s.get("corpus_key") or s["url"] for s in sources)
+    job_id, _ = _register_job(label, False, False, True, req.extractor)
+    JOBS[job_id].update(stage=3, status="queued", collector="analyze:merged",
+                        merged_sources=len(sources))
+    threading.Thread(target=_merge_analyze_worker,
+                     args=(job_id, sources, req.extractor, label),
+                     daemon=True).start()
+    return {"job_id": job_id, "merged_sources": len(sources)}
+
+
+def _run_status_summary(job_id: str, store) -> dict | None:
+    job = JOBS.get(job_id)
+    run = store.get_run(job_id)
+    if not job and not run:
+        return None
+    out = dict(job or {})
+    if run:
+        out.setdefault("job_id", run["job_id"])
+        out.setdefault("seed", run["seed_url"])
+        out.setdefault("stage", run["stage"])
+        out.setdefault("status", run["status"])
+        out.setdefault("error", run["error"])
+        out.setdefault("extractor", run.get("extractor"))
+        out.setdefault("extract_provider", run.get("extract_provider"))
+        out.setdefault("extract_model", run.get("extract_model"))
+        out.setdefault("extract_base_url", run.get("extract_base_url"))
+        out.setdefault("prompt_version", run.get("prompt_version"))
+        out.setdefault("use_corpus", run.get("use_corpus"))
+        out["created_at"] = run.get("created_at")
+        out["updated_at"] = run.get("updated_at")
+    try:
+        counts = _persisted_run_counts(job_id, store)
+        out.update(counts)
+    except Exception:
+        pass
+    progress = _progress_for(job_id, store)
+    out["progress"] = progress
+    out["pct"] = progress.get("pct") if progress else None
+    return {
+        "job_id": out.get("job_id", job_id),
+        "seed": out.get("seed"),
+        "stage": out.get("stage"),
+        "status": out.get("status"),
+        "error": out.get("error"),
+        "progress": out.get("progress"),
+        "pct": out.get("pct"),
+        "extractor": out.get("extractor"),
+        "extract_provider": out.get("extract_provider"),
+        "extract_model": out.get("extract_model"),
+        "extract_base_url": out.get("extract_base_url"),
+        "prompt_version": out.get("prompt_version"),
+        "use_corpus": out.get("use_corpus"),
+        "new": out.get("new"),
+        "threads": out.get("threads"),
+        "authors": out.get("authors"),
+        "pains": out.get("pains"),
+        "clusters": out.get("clusters"),
+        "ranked": out.get("ranked"),
+        "ideas": out.get("ideas"),
+        "created_at": out.get("created_at"),
+        "updated_at": out.get("updated_at"),
+    }
+
+
 @app.get("/api/sources/kickoff/{kickoff_id}")
 def kickoff_status(kickoff_id: str):
     k = KICKOFFS.get(kickoff_id)
     if not k:
         return JSONResponse({"error": "unknown kickoff"}, status_code=404)
-    return k
+    out = dict(k)
+    store = Store(DB)
+    try:
+        enriched = []
+        for item in out.get("items", []):
+            row = dict(item)
+            job_id = row.get("job_id")
+            if job_id:
+                row["run"] = _run_status_summary(job_id, store)
+            enriched.append(row)
+        out["items"] = enriched
+        if not enriched:
+            out["items"] = [
+                {"job_id": job_id, "status": "running",
+                 "run": _run_status_summary(job_id, store)}
+                for job_id in out.get("job_ids", [])
+            ]
+        return out
+    finally:
+        store.close()
 
 
 @app.post("/api/sources/kickoff/{kickoff_id}/stop")
@@ -1057,6 +1264,11 @@ def status(job_id: str):
     return {"job_id": run["job_id"], "seed": run["seed_url"], "stage": run["stage"],
             "status": run["status"], "error": run["error"], "collector": None,
             "note": run.get("note"),
+            "extractor": run.get("extractor"),
+            "extract_provider": run.get("extract_provider"),
+            "extract_model": run.get("extract_model"),
+            "extract_base_url": run.get("extract_base_url"),
+            "prompt_version": run.get("prompt_version"),
             "last_topic_found_at": last_topic_found_at,
             "created_at": run.get("created_at"), "updated_at": run.get("updated_at"),
             "new": counts["new"], "threads": counts["threads"], "authors": counts["authors"],
@@ -1087,6 +1299,25 @@ def runs(limit: int = 25, offset: int = 0, q: str = "", status: str = ""):
     total = store.count_runs(q=q, status=status)
     store.close()
     return {"items": items, "total": total}
+
+
+@app.get("/api/active-runs")
+def active_runs():
+    store = Store(DB)
+    try:
+        active_ids = {row["job_id"] for row in store.get_runs_by_status(sorted(ACTIVE_RUN_STATUSES))}
+        active_ids.update(
+            job_id for job_id, job in JOBS.items()
+            if job.get("status") in ACTIVE_RUN_STATUSES
+        )
+        items = [
+            summary for job_id in active_ids
+            if (summary := _run_status_summary(job_id, store))
+        ]
+        items.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
+        return {"items": items}
+    finally:
+        store.close()
 
 
 @app.get("/api/corpora")

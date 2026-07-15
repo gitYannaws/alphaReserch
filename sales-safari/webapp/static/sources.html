@@ -39,6 +39,15 @@
   .progbar{background:#0c0d11;border:1px solid var(--line);border-radius:5px;height:8px;overflow:hidden;flex:1;min-width:160px}
   .progfill{background:var(--acc);height:100%;transition:width .3s}
   .tag{display:inline-block;padding:1px 8px;border-radius:12px;font-size:11px;border:1px solid var(--line);color:var(--mut);text-transform:lowercase}
+  .stageList{display:grid;gap:8px;margin-top:12px}
+  .stageItem{border:1px solid var(--line);border-radius:8px;background:#111319;padding:10px}
+  .stageTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+  .stageSource{font-weight:700;overflow-wrap:anywhere}
+  .stageMeta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:3px}
+  .stageProgress{display:flex;gap:10px;align-items:center;margin-top:8px}
+  .stageProgress .progbar{min-width:120px}
+  .pct{font-variant-numeric:tabular-nums;color:var(--fg);font-weight:700;min-width:42px;text-align:right}
+  .mini{font-size:11px}
   code{font-size:12px}
 </style>
 </head>
@@ -71,16 +80,18 @@
         <div style="width:150px">
           <label style="margin-bottom:4px">Extractor</label>
           <select id="koExtractor">
-            <option value="qwen" selected>Qwen (local)</option>
+            <option value="qwen" selected>Qwen 2.5 14B (local)</option>
+            <option value="qwen3">Qwen3 14B (local)</option>
             <option value="claude">Claude CLI</option>
             <option value="glm">GLM (local)</option>
           </select>
         </div>
         <button id="analyzeBtn" disabled title="Pick 1-15 collected sources to enable">Analyze (3&rarr;15)</button>
+        <button id="mergeAnalyzeBtn" class="secondary" disabled title="Pick 2-15 collected sources to merge into one run">Merge + Analyze</button>
       </div>
     </div>
     <div class="dim" style="margin-top:8px;font-size:12px">
-      <b>Analyze</b> runs extraction &rarr; report over already-collected corpora (stages 3-15), 1-15 sources.
+      <b>Analyze</b> runs each source separately. <b>Merge + Analyze</b> combines selected corpora into one run and one report.
     </div>
     <table>
       <thead>
@@ -113,6 +124,15 @@
     </div>
     <div class="dim" id="koCurrent" style="margin-top:8px"></div>
     <div id="koJobs" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"></div>
+    <div id="koItems" class="stageList"></div>
+  </div>
+
+  <div class="card" id="activeCard" style="display:none">
+    <div class="kickbar">
+      <label style="margin:0">Active runs</label>
+      <span class="badge" id="activeBadge">checking</span>
+    </div>
+    <div id="activeItems" class="stageList"></div>
   </div>
 </main>
 <script>
@@ -140,6 +160,24 @@ function splitKey(key){
 const KICKOFF_MAX = 15;
 let SOURCES = [];
 let koPoll = null;
+let activePoll = null;
+let mergeReady = false;
+const STAGE_NAME = {
+  1: "Collect",
+  2: "Store",
+  3: "Extract",
+  4: "Embed",
+  5: "Cluster",
+  6: "Score",
+  7: "Filter",
+  8: "Competition",
+  9: "Rank",
+  10: "Ideas",
+  11: "Validate",
+  12: "Report",
+};
+const DONE_STATUSES = new Set(["done", "reported"]);
+const BAD_STATUSES = new Set(["error", "cancelled", "interrupted", "stopped"]);
 
 async function loadSources(){
   SOURCES = await (await fetch("/api/sources")).json();
@@ -156,6 +194,13 @@ function updateSelCount(){
   $("analyzeBtn").title = canAnalyze
     ? `Analyze ${n} collected corpora (stages 3-15)`
     : `Pick 1-${KICKOFF_MAX} sources to analyze (currently ${n})`;
+  const canMerge = mergeReady && n >= 2 && n <= KICKOFF_MAX;
+  $("mergeAnalyzeBtn").disabled = !canMerge;
+  $("mergeAnalyzeBtn").title = canMerge
+    ? `Merge ${n} corpora into one analysis run`
+    : mergeReady
+      ? `Pick 2-${KICKOFF_MAX} sources to merge (currently ${n})`
+      : "Merge analyze will be available after the server reloads";
 }
 const FRESHNESS = {
   no_data:     {label: "No data",     cls: "dim"},
@@ -205,6 +250,75 @@ function renderRows(){
   updateSelCount();
 }
 
+function statusClass(status){
+  if(DONE_STATUSES.has(status)) return " done";
+  if(BAD_STATUSES.has(status)) return " err";
+  if(status === "queued" || status === "recovering") return " warn";
+  return "";
+}
+function runPct(run, itemStatus){
+  if(run && run.progress && run.progress.pct != null) return Math.max(0, Math.min(100, Number(run.progress.pct) || 0));
+  const status = run?.status || itemStatus;
+  return DONE_STATUSES.has(status) ? 100 : 0;
+}
+function progressText(run, itemStatus){
+  const p = run?.progress;
+  if(p && p.total > 0) return `${p.done}/${p.total} ${p.unit || "items"} - ${runPct(run, itemStatus)}%`;
+  if(p && p.total === 0 && p.unit) return p.unit;
+  const status = run?.status || itemStatus || "queued";
+  return DONE_STATUSES.has(status) ? "complete" : status;
+}
+function sourceName(seed, corpusKey, label){
+  if(label) return label;
+  const key = splitKey(corpusKey || "");
+  if(key.name) return key.name;
+  try {
+    const u = new URL(seed);
+    return u.pathname.replace(/^\/|\/$/g, "") || u.hostname;
+  } catch {
+    return seed || "-";
+  }
+}
+function renderStageItem(item, run){
+  const status = run?.status || item.status || "queued";
+  const pct = runPct(run, item.status);
+  const stage = run?.stage || item.stage;
+  const stageLabel = stage ? `Stage ${stage} - ${STAGE_NAME[stage] || status}` : "Queued";
+  const name = sourceName(item.seed || run?.seed, item.corpus_key, item.label);
+  const job = run?.job_id || item.job_id;
+  const err = run?.error || item.error;
+  const counts = run ? [
+    run.pains != null ? `${run.pains} pains` : "",
+    run.clusters != null ? `${run.clusters} themes` : "",
+    run.ideas != null ? `${run.ideas} ideas` : "",
+  ].filter(Boolean).join(" / ") : "";
+  return `
+    <div class="stageItem">
+      <div class="stageTop">
+        <div>
+          <div class="stageSource">${esc(name)}</div>
+          <div class="stageMeta">
+            <span class="badge mini${statusClass(status)}">${esc(status)}</span>
+            <span class="dim">${esc(stageLabel)}</span>
+            ${job ? `<a class="mini" href="/?job=${esc(job)}" target="_blank">${esc(job)}</a>` : ""}
+          </div>
+        </div>
+        <div class="pct">${pct}%</div>
+      </div>
+      <div class="stageProgress">
+        <div class="progbar"><div class="progfill" style="width:${pct}%"></div></div>
+        <span class="dim mini">${esc(progressText(run, item.status))}</span>
+      </div>
+      ${counts ? `<div class="dim mini" style="margin-top:6px">${esc(counts)}</div>` : ""}
+      ${err ? `<div class="err mini">${esc(err)}</div>` : ""}
+    </div>`;
+}
+function renderStageList(el, items){
+  el.innerHTML = items.length
+    ? items.map(item => renderStageItem(item, item.run || item)).join("")
+    : `<div class="dim">No active analysis runs.</div>`;
+}
+
 $("selAll").addEventListener("change", e => {
   document.querySelectorAll(".srcChk").forEach(c => c.checked = e.target.checked);
   updateSelCount();
@@ -238,6 +352,23 @@ async function startKickoff(mode){
 }
 $("analyzeBtn").addEventListener("click", () => startKickoff("analyze"));
 
+async function startMergeAnalyze(){
+  const source_ids = selectedIds();
+  const selected = SOURCES.filter(s => source_ids.includes(s.id));
+  const label = "merged:" + selected.map(s => s.corpus_key || splitKey(s.url).name).join("+");
+  const r = await fetch("/api/sources/merge-analyze", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      source_ids,
+      extractor: $("koExtractor").value,
+      label,
+    })});
+  const data = await r.json();
+  if(!r.ok){ alert(data.error || "merge analyze failed"); return; }
+  $("activeCard").style.display = "block";
+  pollActive();
+}
+$("mergeAnalyzeBtn").addEventListener("click", startMergeAnalyze);
+
 $("koStop").addEventListener("click", async () => {
   const id = $("kickoffCard").dataset.kickoffId;
   if(id) await fetch(`/api/sources/kickoff/${id}/stop`, {method:"POST"});
@@ -256,9 +387,10 @@ function pollKickoff(id){
     $("koBadge").className = "badge" + (k.status === "done" ? " done" : "");
     $("koBadge").textContent = (k.mode || "collect") + " · " + k.status;
     $("koCurrent").textContent = k.current_source
-      ? `now collecting: ${k.current_source} (job ${k.current_job_id})` : "";
+      ? `now ${k.mode === "analyze" ? "analyzing" : "collecting"}: ${k.current_source} (job ${k.current_job_id})` : "";
     $("koJobs").innerHTML = k.job_ids.map(j =>
       `<a href="/?job=${j}" target="_blank">${j}</a>`).join("");
+    renderStageList($("koItems"), k.items || []);
     if(k.status !== "running"){
       clearInterval(koPoll);
       loadSources();
@@ -268,7 +400,35 @@ function pollKickoff(id){
   koPoll = setInterval(tick, 2000);
 }
 
+async function pollActive(){
+  const tick = async () => {
+    const r = await fetch("/api/active-runs");
+    if(!r.ok) return;
+    const data = await r.json();
+    const items = (data.items || []).map(run => ({run, status: run.status, seed: run.seed}));
+    $("activeCard").style.display = items.length ? "block" : "none";
+    $("activeBadge").className = "badge" + (items.length ? " warn" : " dim");
+    $("activeBadge").textContent = `${items.length} running`;
+    renderStageList($("activeItems"), items);
+  };
+  await tick();
+  if(activePoll) clearInterval(activePoll);
+  activePoll = setInterval(tick, 3000);
+}
+
+async function probeMergeAnalyze(){
+  try {
+    const r = await fetch("/api/sources/merge-analyze", {method:"OPTIONS"});
+    mergeReady = r.status !== 404;
+  } catch {
+    mergeReady = false;
+  }
+  updateSelCount();
+}
+
 loadSources();
+pollActive();
+probeMergeAnalyze();
 </script>
 </body>
 </html>
