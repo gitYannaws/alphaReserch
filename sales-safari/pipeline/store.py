@@ -14,7 +14,7 @@ from pathlib import Path
 from .collectors.base import Document
 
 _SALT = os.environ.get("SAFARI_SALT", "sales-safari-v1")
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS runs(
   extract_base_url TEXT,
   extract_config_json TEXT,
   prompt_version TEXT,
+  code_version TEXT,
+  config_hash TEXT,
+  server_started_at TEXT,
   inherited_doc_count INTEGER DEFAULT 0,
   inherited_topic_count INTEGER DEFAULT 0,
   inherited_author_count INTEGER DEFAULT 0,
@@ -307,6 +310,9 @@ def _migrate(conn):
     _ensure_column(conn, "runs", "extract_base_url", "extract_base_url TEXT")
     _ensure_column(conn, "runs", "extract_config_json", "extract_config_json TEXT")
     _ensure_column(conn, "runs", "prompt_version", "prompt_version TEXT")
+    _ensure_column(conn, "runs", "code_version", "code_version TEXT")
+    _ensure_column(conn, "runs", "config_hash", "config_hash TEXT")
+    _ensure_column(conn, "runs", "server_started_at", "server_started_at TEXT")
     _ensure_column(conn, "runs", "inherited_doc_count", "inherited_doc_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_topic_count", "inherited_topic_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_author_count", "inherited_author_count INTEGER DEFAULT 0")
@@ -324,7 +330,8 @@ def _migrate(conn):
 class Store:
     def __init__(self, path: str = "db/safari.sqlite"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path, timeout=30)
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA foreign_keys=ON")
         _migrate(self.conn)
 
@@ -334,19 +341,24 @@ class Store:
                   search_assist: bool = False, extract_provider: str | None = None,
                   extract_model: str | None = None, extract_base_url: str | None = None,
                   extract_config_json: str | None = None,
-                  prompt_version: str | None = None):
+                  prompt_version: str | None = None,
+                  code_version: str | None = None,
+                  config_hash: str | None = None,
+                  server_started_at: str | None = None):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT OR REPLACE INTO runs("
             "job_id,seed_url,stage,status,error,note,use_render,use_firecrawl,use_corpus,historical,search_assist,extractor,"
             "extract_provider,extract_model,extract_base_url,extract_config_json,prompt_version,"
+            "code_version,config_hash,server_started_at,"
             "inherited_doc_count,inherited_topic_count,inherited_author_count,last_topic_found_at,updated_at,created_at"
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, seed_url, 1, "collecting", None, None, int(bool(use_render)),
              int(bool(use_firecrawl)), int(bool(use_corpus)), int(bool(historical)),
              int(bool(search_assist)), extractor, extract_provider, extract_model,
-             extract_base_url, extract_config_json, prompt_version, 0, 0, 0, None, now, now))
+             extract_base_url, extract_config_json, prompt_version, code_version,
+             config_hash, server_started_at, 0, 0, 0, None, now, now))
         self.conn.commit()
 
     def set_run_inherited_counts(self, run_id: str, docs: int, topics: int, authors: int):
@@ -430,7 +442,8 @@ class Store:
         cols = ["job_id", "seed_url", "stage", "status", "error", "note", "use_render",
                 "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor",
                 "extract_provider", "extract_model", "extract_base_url", "extract_config_json",
-                "prompt_version", "inherited_doc_count",
+                "prompt_version", "code_version", "config_hash", "server_started_at",
+                "inherited_doc_count",
                 "inherited_topic_count", "inherited_author_count", "last_topic_found_at",
                 "updated_at", "created_at"]
         row = self.conn.execute(f"SELECT {','.join(cols)} FROM runs WHERE job_id=?", (run_id,)).fetchone()
@@ -443,7 +456,8 @@ class Store:
         cols = ["job_id", "seed_url", "stage", "status", "error", "note", "use_render",
                 "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor",
                 "extract_provider", "extract_model", "extract_base_url", "extract_config_json",
-                "prompt_version", "inherited_doc_count",
+                "prompt_version", "code_version", "config_hash", "server_started_at",
+                "inherited_doc_count",
                 "inherited_topic_count", "inherited_author_count", "last_topic_found_at",
                 "updated_at", "created_at"]
         rows = self.conn.execute(
@@ -1019,7 +1033,7 @@ class Store:
         rows = self.conn.execute(
             "SELECT c.id,c.label,c.size,c.distinct_authors,p.id,p.complaint,"
             "p.workflow_pain,p.workaround,p.wish,p.persona,p.verbatim_span,"
-            "p.source_permalink,p.author_hash,d.source_granularity,d.score "
+            "p.source_permalink,p.author_hash,d.source_granularity,d.score,d.thread_url,d.title "
             "FROM clusters c "
             "JOIN cluster_members cm ON cm.cluster_id=c.id "
             "JOIN pains p ON p.id=cm.pain_id "
@@ -1050,6 +1064,8 @@ class Store:
                 "author_hash": r[12],
                 "source_granularity": r[13],
                 "score": r[14],
+                "thread_url": r[15],
+                "title": r[16],
             })
         return list(clusters.values())
 

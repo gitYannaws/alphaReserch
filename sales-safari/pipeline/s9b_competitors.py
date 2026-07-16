@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 from .extract import _call_extractor, _parse_json_array
 
+DEFAULT_BATCH_SIZE = 20
+
 PROMPT_HEADER = """You are a competitive-intelligence analyst for early-stage product research.
 
 INPUT: a JSON array of pain THEMES, each {id, label, pains:[short strings]}. The text is
@@ -63,10 +65,16 @@ def _clean(c: dict) -> dict:
     }
 
 
+def _chunks(items: list, size: int):
+    size = max(1, int(size or DEFAULT_BATCH_SIZE))
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
 def competitors_run(store, run_id: str, top_n: int = 5, cover_top: int = None,
                     saturation_per_competitor: float = 2.0, extract_cfg: dict = None,
-                    progress=None) -> dict:
-    """Discover real competitors for the top `cover_top` themes in ONE batched call, then
+                    progress=None, batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
+    """Discover real competitors for the top `cover_top` themes in bounded batches, then
     backfill saturation from the per-theme competitor count so rank (re-run afterwards)
     reflects real competition instead of the inert stage-8 heuristic. `cover_top` defaults
     wider than `top_n` (ideas) so the eventual top themes have real saturation data."""
@@ -84,9 +92,12 @@ def competitors_run(store, run_id: str, top_n: int = 5, cover_top: int = None,
         progress(0, len(ranked))
     details = {c["id"]: c for c in store.get_cluster_details(run_id)}
     payload = [_theme_payload(details[r["cluster_id"]]) for r in ranked if r["cluster_id"] in details]
-    prompt = PROMPT_HEADER + json.dumps(payload, ensure_ascii=False)
-    raw, _provider = _call_extractor(prompt, extract_cfg)
-    by_theme = {str(it.get("id")): it.get("competitors") or [] for it in _parse_json_array(raw)}
+    by_theme = {}
+    for batch in _chunks(payload, batch_size):
+        prompt = PROMPT_HEADER + json.dumps(batch, ensure_ascii=False)
+        raw, _provider = _call_extractor(prompt, extract_cfg)
+        for it in _parse_json_array(raw):
+            by_theme[str(it.get("id"))] = it.get("competitors") or []
 
     saved, themes_with = 0, 0
     for i, row in enumerate(ranked, start=1):

@@ -7,9 +7,7 @@ bot signals (navigator.webdriver, HeadlessChrome) that Cloudflare also flags.
 
 Operator owns the robots.txt / ToS decision for the seed domain.
 """
-import random
 import re
-import time
 from html import unescape
 from typing import Iterator, List
 from urllib.parse import urljoin, urlparse
@@ -17,6 +15,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from .base import Collector, Document
+from pipeline.rate_limit import AdaptiveRateLimiter
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -66,17 +65,15 @@ class XenforoCollector(Collector):
         self.timeout = timeout
         self.sess = requests.Session()
         self.sess.headers.update(UA)
-        # Adaptive rate-limit control: every 403/429 multiplies the inter-request delay
-        # (up to rl_max_mult) and retries the same request after an escalating cooldown;
-        # successful requests slowly decay the multiplier back toward 1.0. rate_limit_hits
-        # is read by the worker to surface a live counter in the UI.
-        self.rl_backoff = rl_backoff
-        self.rl_max_mult = rl_max_mult
-        self.rl_recover = rl_recover
-        self.rl_retries = max(0, int(rl_retries))
-        self.rl_cooldown = rl_cooldown_seconds
-        self.rate_limit_hits = 0
-        self._delay_mult = 1.0
+        self.limiter = AdaptiveRateLimiter(
+            min_delay_seconds, max_delay_seconds, backoff=rl_backoff,
+            max_multiplier=rl_max_mult, recover=rl_recover,
+            retries=rl_retries, cooldown_seconds=rl_cooldown_seconds,
+        )
+
+    @property
+    def rate_limit_hits(self) -> int:
+        return self.limiter.hits
 
     @staticmethod
     def is_xenforo(seed: str) -> bool:
@@ -90,26 +87,19 @@ class XenforoCollector(Collector):
         return any(m in t for m in ('data-xf-init', 'xf-init', 'id="xf"', 'xenforo'))
 
     def _get(self, url: str) -> str:
-        for attempt in range(self.rl_retries + 1):
+        for attempt in range(self.limiter.retries + 1):
             r = self.sess.get(url, timeout=self.timeout)
             if r.status_code in (403, 429):
-                # Rate-limited: count it, slow every future request, and back off harder
-                # here before retrying this one. Give up (skip the thread) only after
-                # rl_retries adaptive cooldowns.
-                self.rate_limit_hits += 1
-                self._delay_mult = min(self._delay_mult * self.rl_backoff, self.rl_max_mult)
-                if attempt < self.rl_retries:
-                    time.sleep(self.rl_cooldown * self._delay_mult)
+                if self.limiter.hit(attempt):
                     continue
                 raise XenforoCollectorError(
                     f"HTTP {r.status_code} for {url} after {attempt + 1} tries; skipping")
             r.raise_for_status()
-            # Recovered: gently decay the penalty back toward the base delay.
-            self._delay_mult = max(1.0, self._delay_mult * self.rl_recover)
+            self.limiter.success()
             return r.text
 
     def _sleep(self):
-        time.sleep(random.uniform(self.min_delay, self.max_delay) * self._delay_mult)
+        self.limiter.sleep()
 
     def _is_thread(self, url: str) -> bool:
         return any(p in url for p in self.thread_patterns)

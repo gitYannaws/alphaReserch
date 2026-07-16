@@ -4,16 +4,15 @@ This is a rendering fallback, not an evasion layer:
 - no stealth plugins
 - no proxy rotation
 - no CAPTCHA solving
-- stops on 403/429, login walls, CAPTCHA, and bot-wall text
+- slows/retries on 403/429, login walls, CAPTCHA, and bot-wall text, then stops
 """
-import random
 import re
-import time
 from typing import Iterator, List
 from urllib.parse import urljoin, urlparse
 
 from .base import Collector, Document
 from pipeline.domain_policy import find_unsupported_domain, format_unsupported_domain_error
+from pipeline.rate_limit import AdaptiveRateLimiter
 
 BLOCKED_TEXT = (
     "captcha",
@@ -51,7 +50,9 @@ class PlaywrightCollector(Collector):
                  headless: bool = True, allowed_domains=None, unsupported_domains=None,
                  wait_after_load_ms: int = 1200, scroll_steps: int = 0,
                  scroll_delay_ms: int = 500, max_scrolls: int = 40,
-                 scroll_settle_rounds: int = 2):
+                 scroll_settle_rounds: int = 2, rl_backoff: float = 1.6,
+                 rl_max_mult: float = 8.0, rl_recover: float = 0.9,
+                 rl_retries: int = 2, rl_cooldown_seconds: float = 5.0):
         self.thread_patterns = thread_patterns or ([thread_pattern] if thread_pattern else [])
         self.same_domain_only = same_domain_only
         self.max_pages = max_pages
@@ -69,9 +70,18 @@ class PlaywrightCollector(Collector):
         # is how many consecutive no-growth rounds prove the feed is exhausted.
         self.max_scrolls = max_scrolls
         self.scroll_settle_rounds = scroll_settle_rounds
+        self.limiter = AdaptiveRateLimiter(
+            min_delay_seconds, max_delay_seconds, backoff=rl_backoff,
+            max_multiplier=rl_max_mult, recover=rl_recover,
+            retries=rl_retries, cooldown_seconds=rl_cooldown_seconds,
+        )
+
+    @property
+    def rate_limit_hits(self) -> int:
+        return self.limiter.hits
 
     def _sleep(self):
-        time.sleep(random.uniform(self.min_delay_seconds, self.max_delay_seconds))
+        self.limiter.sleep()
 
     def _check_allowed(self, seed_url: str):
         host = _host(seed_url)
@@ -86,20 +96,28 @@ class PlaywrightCollector(Collector):
                 f"Playwright fallback is not allowed for {host}; add it to collection.playwright.allowed_domains."
             )
 
-    def _check_page(self, page, url: str):
+    def _check_page(self, page, url: str) -> bool:
         status = page.evaluate("() => document.body ? document.body.innerText : ''")
         low = (status or "").lower()
-        if any(marker in low for marker in BLOCKED_TEXT):
-            raise PlaywrightCollectorError(f"blocked page detected for {url}; stopping")
+        return any(marker in low for marker in BLOCKED_TEXT)
 
     def _goto(self, page, url: str):
-        resp = page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-        code = resp.status if resp else None
-        if code in (403, 429):
-            raise PlaywrightCollectorError(f"HTTP {code} for {url}; stopping")
-        page.wait_for_timeout(self.wait_after_load_ms)
-        self._check_page(page, url)
-        return resp
+        for attempt in range(self.limiter.retries + 1):
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            code = resp.status if resp else None
+            if code in (403, 429):
+                if self.limiter.hit(attempt):
+                    continue
+                raise PlaywrightCollectorError(
+                    f"HTTP {code} for {url} after {attempt + 1} tries; stopping")
+            page.wait_for_timeout(self.wait_after_load_ms)
+            if self._check_page(page, url):
+                if self.limiter.hit(attempt):
+                    continue
+                raise PlaywrightCollectorError(
+                    f"blocked page detected for {url} after {attempt + 1} tries; stopping")
+            self.limiter.success()
+            return resp
 
     def _scroll(self, page):
         """Drain a lazy-loading (infinite) feed.

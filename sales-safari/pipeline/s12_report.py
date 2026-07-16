@@ -14,11 +14,14 @@ def _signals(row, dim):
     return ", ".join(signals) if signals else "none"
 
 
-def report_run(store, run_id: str, out_dir: str = "reports", progress=None) -> dict:
+def report_run(store, run_id: str, out_dir: str = "reports", progress=None,
+               max_ranked_themes: int = 50) -> dict:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     report_path = Path(out_dir) / f"{run_id}.md"
     run = store.get_run(run_id) or {}
-    ranked = store.get_ranked_clusters(run_id, include_dropped=True)
+    all_ranked = store.get_ranked_clusters(run_id, include_dropped=True)
+    max_ranked_themes = max(0, int(max_ranked_themes or 0))
+    ranked = all_ranked[:max_ranked_themes] if max_ranked_themes else all_ranked
     ideas = store.get_ideas(run_id)
     total = len(ranked) + len(ideas) + 1
     done = 0
@@ -64,9 +67,21 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None) -> d
         meta.append(f"- Extract base URL: {run['extract_base_url']}")
     if run.get("prompt_version"):
         meta.append(f"- Prompt version: {run['prompt_version']}")
+    if run.get("code_version"):
+        meta.append(f"- Code version: {run['code_version']}")
+    if run.get("config_hash"):
+        meta.append(f"- Config hash: {run['config_hash']}")
+    if run.get("server_started_at"):
+        meta.append(f"- Server started at: {run['server_started_at']}")
     if meta:
         lines.extend(["## Run Metadata", "", *meta, ""])
     lines.extend(["## Ranked Themes", ""])
+    if len(ranked) < len(all_ranked):
+        lines.extend([
+            f"Showing top {len(ranked)} of {len(all_ranked)} ranked themes. "
+            "Full rankings remain in the SQLite database.",
+            "",
+        ])
     if not ranked:
         lines.extend([
             "No ranked themes were produced for this run.",

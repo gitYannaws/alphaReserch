@@ -92,7 +92,8 @@ def _choose_category(text: str):
         if any(t in low for t in triggers):
             return key, title, noun, promise
     if any(city in low for city in _CITY_WORDS):
-        return _CATEGORY_RULES[0]
+        key, _triggers, title, noun, promise = _CATEGORY_RULES[0]
+        return key, title, noun, promise
     return (
         "research",
         "Signal Board",

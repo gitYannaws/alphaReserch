@@ -11,8 +11,41 @@ import json
 DEFAULT_SOLVABLE_WEIGHTS = {"yes": 1.0, "partial": 0.6, "no": 0.25, "unknown": 0.5}
 
 
-def rank_run(store, run_id: str, solvable_weights: dict = None, progress=None) -> dict:
+def _support_by_cluster(store, run_id: str) -> dict:
+    support = {}
+    for cluster in store.get_cluster_details(run_id):
+        threads = {
+            p.get("thread_url") or p.get("title") or p.get("source_permalink")
+            for p in cluster.get("pains", [])
+            if p.get("thread_url") or p.get("title") or p.get("source_permalink")
+        }
+        support[cluster["id"]] = {
+            "evidence_count": len(cluster.get("pains", [])),
+            "distinct_authors": int(cluster.get("distinct_authors") or 0),
+            "distinct_threads": len(threads),
+        }
+    return support
+
+
+def _support_reasons(support: dict, thresholds: dict) -> list:
+    reasons = []
+    checks = (
+        ("evidence_count", "insufficient_evidence"),
+        ("distinct_authors", "insufficient_authors"),
+        ("distinct_threads", "insufficient_threads"),
+    )
+    for key, reason in checks:
+        need = int(thresholds.get(key) or 0)
+        if need and int(support.get(key) or 0) < need:
+            reasons.append(reason)
+    return reasons
+
+
+def rank_run(store, run_id: str, solvable_weights: dict = None, min_support: dict = None,
+             progress=None) -> dict:
     weights = {**DEFAULT_SOLVABLE_WEIGHTS, **(solvable_weights or {})}
+    min_support = min_support or {}
+    support_map = _support_by_cluster(store, run_id) if min_support else {}
     rows = store.conn.execute(
         "SELECT c.id,COALESCE(ds.demand_score,0),COALESCE(ci.persistence_score,3),"
         "COALESCE(ci.saturation_score,0),COALESCE(fr.dropped,0),"
@@ -30,14 +63,18 @@ def rank_run(store, run_id: str, solvable_weights: dict = None, progress=None) -
         solvable = (r[6] or "unknown").strip().lower()
         sw = weights.get(solvable, weights["unknown"])
         base = (demand * persistence) / (1.0 + saturation)
-        rank_score = 0.0 if r[4] else round(base * sw, 2)
+        support = support_map.get(r[0], {})
+        support_reasons = _support_reasons(support, min_support)
+        dropped = bool(r[4] or support_reasons)
+        rank_score = 0.0 if dropped else round(base * sw, 2)
         reasons = json.loads(r[5] or "[]")
+        reasons.extend(support_reasons)
         ranked.append({
             "cluster_id": r[0],
             "demand_score": demand,
             "persistence_score": persistence,
             "saturation_score": saturation,
-            "dropped": bool(r[4]),
+            "dropped": dropped,
             "filter_reasons": reasons,
             "solvable_weight": sw,
             "rank_breakdown": {
@@ -48,6 +85,8 @@ def rank_run(store, run_id: str, solvable_weights: dict = None, progress=None) -
                 "solvable": solvable,
                 "solvable_weight": sw,
                 "warning_flags": reasons,
+                "support": support,
+                "min_support": min_support,
             },
             "rank_score": rank_score,
         })

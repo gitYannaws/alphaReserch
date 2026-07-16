@@ -82,7 +82,8 @@
           <select id="koExtractor">
             <option value="qwen" selected>Qwen 2.5 14B (local)</option>
             <option value="qwen3">Qwen3 14B (local)</option>
-            <option value="claude">Claude CLI</option>
+            <option value="claude_sonnet">Claude Sonnet 4.6 (claude-sonnet-4-6)</option>
+            <option value="claude_haiku">Claude Haiku 4.5 (claude-haiku-4-5-20251001)</option>
             <option value="glm">GLM (local)</option>
           </select>
         </div>
@@ -162,6 +163,7 @@ let SOURCES = [];
 let koPoll = null;
 let activePoll = null;
 let mergeReady = false;
+let EXTRACTOR_OPTIONS = {};
 const STAGE_NAME = {
   1: "Collect",
   2: "Store",
@@ -178,6 +180,30 @@ const STAGE_NAME = {
 };
 const DONE_STATUSES = new Set(["done", "reported"]);
 const BAD_STATUSES = new Set(["error", "cancelled", "interrupted", "stopped"]);
+
+function extractorLabelFromValue(value){
+  return EXTRACTOR_OPTIONS[value]?.label || value || "";
+}
+function extractorModelText(run){
+  if(run?.extract_model){
+    if(run.extract_provider === "claude") return `Claude CLI --model ${run.extract_model}`;
+    return run.extract_model;
+  }
+  return extractorLabelFromValue(run?.extractor || run?.extract_provider);
+}
+async function loadExtractorOptions(){
+  try{
+    const data = await (await fetch("/api/extractors")).json();
+    EXTRACTOR_OPTIONS = {};
+    (data.items || []).forEach(item => { EXTRACTOR_OPTIONS[item.value] = item; });
+    const sel = $("koExtractor"), cur = sel.value;
+    [...sel.options].forEach(opt => {
+      const label = extractorLabelFromValue(opt.value);
+      if(label) opt.textContent = label;
+    });
+    sel.value = cur;
+  }catch(e){}
+}
 
 async function loadSources(){
   SOURCES = await (await fetch("/api/sources")).json();
@@ -292,6 +318,7 @@ function renderStageItem(item, run){
     run.clusters != null ? `${run.clusters} themes` : "",
     run.ideas != null ? `${run.ideas} ideas` : "",
   ].filter(Boolean).join(" / ") : "";
+  const extractor = extractorModelText(run);
   return `
     <div class="stageItem">
       <div class="stageTop">
@@ -309,6 +336,7 @@ function renderStageItem(item, run){
         <div class="progbar"><div class="progfill" style="width:${pct}%"></div></div>
         <span class="dim mini">${esc(progressText(run, item.status))}</span>
       </div>
+      ${extractor ? `<div class="dim mini" style="margin-top:6px">Extractor: ${esc(extractor)}</div>` : ""}
       ${counts ? `<div class="dim mini" style="margin-top:6px">${esc(counts)}</div>` : ""}
       ${err ? `<div class="err mini">${esc(err)}</div>` : ""}
     </div>`;
@@ -426,6 +454,7 @@ async function probeMergeAnalyze(){
   updateSelCount();
 }
 
+loadExtractorOptions();
 loadSources();
 pollActive();
 probeMergeAnalyze();

@@ -146,6 +146,7 @@ def pick_collector(seed: str, cfg: dict, known_thread_urls=None, corpus_mode: st
 
     def playwright():
         pw = coll.get("playwright", {})
+        rl = coll.get("rate_limit", {})
         return PlaywrightCollector(
             thread_pattern=coll.get("thread_url_pattern", "/t/"),
             thread_patterns=coll.get("thread_url_patterns"),
@@ -162,6 +163,11 @@ def pick_collector(seed: str, cfg: dict, known_thread_urls=None, corpus_mode: st
             scroll_delay_ms=pw.get("scroll_delay_ms", 500),
             max_scrolls=pw.get("max_scrolls", 40),
             scroll_settle_rounds=pw.get("scroll_settle_rounds", 2),
+            rl_backoff=rl.get("backoff", 1.6),
+            rl_max_mult=rl.get("max_multiplier", 8.0),
+            rl_recover=rl.get("recover", 0.9),
+            rl_retries=rl.get("retries", 2),
+            rl_cooldown_seconds=rl.get("cooldown_seconds", 5.0),
         )
 
     def xenforo():

@@ -6,14 +6,15 @@ It tags each theme with whether a pure software product could solve the core pai
 to color the ranked-themes table so you can see at a glance which pains are
 software-shaped opportunities.
 
-Classification is semantic (an LLM call), reusing the stage-3 extractor plumbing so it
-inherits the Claude-primary / Codex-fallback behavior.
+Classification is semantic (batched LLM calls), reusing the stage-3 extractor plumbing
+so it inherits the Claude-primary / Codex-fallback behavior.
 """
 import json
 
 from .extract import _call_extractor, _parse_json_array
 
 VALID = {"yes", "partial", "no"}
+DEFAULT_BATCH_SIZE = 40
 
 PROMPT_HEADER = """You classify market-research pain THEMES by whether a SOFTWARE product ALONE could solve them.
 
@@ -59,7 +60,14 @@ def _coerce(item: dict) -> tuple:
     return solvable, conf, reason
 
 
-def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None) -> dict:
+def _chunks(items: list, size: int):
+    size = max(1, int(size or DEFAULT_BATCH_SIZE))
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
+                   batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
     clusters = store.get_cluster_details(run_id)
     store.clear_soft_filters(run_id)
     if not clusters:
@@ -71,9 +79,12 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None) 
     if progress:
         progress(0, len(clusters))
     payload = [_theme_payload(c) for c in clusters]
-    prompt = PROMPT_HEADER + json.dumps(payload, ensure_ascii=False)
-    raw, _provider = _call_extractor(prompt, extract_cfg)
-    items = {str(it.get("id")): it for it in _parse_json_array(raw)}
+    items = {}
+    for batch in _chunks(payload, batch_size):
+        prompt = PROMPT_HEADER + json.dumps(batch, ensure_ascii=False)
+        raw, _provider = _call_extractor(prompt, extract_cfg)
+        for it in _parse_json_array(raw):
+            items[str(it.get("id"))] = it
 
     counts, classified = {}, 0
     for i, cluster in enumerate(clusters, start=1):

@@ -3,6 +3,7 @@
 Run: .venv/Scripts/python -m uvicorn webapp.app:app --port 8000
 """
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -33,6 +35,7 @@ CFG = load_config(str(ROOT / "config.yaml"))
 DB = str(ROOT / CFG.get("db_path", "db/safari.sqlite"))
 INDEX = (BASE / "static" / "index.html").read_text(encoding="utf-8")
 SOURCES = (BASE / "static" / "sources.html").read_text(encoding="utf-8")
+APP_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 _RETRY = CFG.get("retry", {})
 RETRY_ATTEMPTS = _RETRY.get("attempts", 3)
@@ -49,6 +52,32 @@ ACTIVE_RUN_STATUSES = {"starting", "collecting", "collecting-paused", "storing",
                        "clustering", "scoring", "filtering", "soft-filtering", "competing",
                        "competitor-discovery", "review-mining", "ranking", "ideating",
                        "validating", "reporting", "stopping", "recovering"}
+
+CLAUDE_EXTRACTOR_MODELS = {
+    "claude": "claude-sonnet-4-6",  # backward-compatible old UI value
+    "claude_sonnet": "claude-sonnet-4-6",
+    "claude_haiku": "claude-haiku-4-5-20251001",
+}
+
+
+def _extractor_options(run_cfg: dict) -> list[dict]:
+    extract_cfg = run_cfg.get("extract", {})
+    labels = {
+        "qwen": "Qwen 2.5",
+        "qwen3": "Qwen3",
+        "glm": "GLM",
+    }
+    options = []
+    for key in ("qwen", "qwen3", "claude_sonnet", "claude_haiku", "glm"):
+        if key in CLAUDE_EXTRACTOR_MODELS:
+            model = CLAUDE_EXTRACTOR_MODELS[key]
+            family = "Sonnet 4.6" if key == "claude_sonnet" else "Haiku 4.5"
+            detail = f"Claude {family} ({model})"
+        else:
+            model = (extract_cfg.get(key, {}) or {}).get("model")
+            detail = f"{labels[key]} ({model})" if model else labels[key]
+        options.append({"value": key, "label": detail, "model": model})
+    return options
 
 
 class RunCancelled(Exception):
@@ -69,7 +98,7 @@ class RunReq(BaseModel):
     historical: bool = False      # corpus mode: favor older unseen threads, not refresh
     search_assist: bool = False   # Firecrawl web-search extra Reddit thread URLs before listing walk
     cooldown: bool = True          # Reddit backfill rest breaks (45m work / 30m pause); off = faster, riskier
-    extractor: Optional[str] = None  # None/"claude" | "qwen" | "qwen3" | "glm" -> stage-3 provider
+    extractor: Optional[str] = None  # None/"claude_sonnet"/"claude_haiku" | "qwen" | "qwen3" | "glm"
 
 
 def _collector_to_toggles(collector: Optional[str]) -> tuple[bool, bool]:
@@ -91,12 +120,65 @@ def _extractor_providers(name):
     Claude if the local endpoint is down. None -> keep config default."""
     if name in ("qwen", "qwen3", "glm", "local"):
         return [name, "claude"]
-    if name == "claude":
+    if name in CLAUDE_EXTRACTOR_MODELS:
         return ["claude", "codex"]
     return None
 
 
+def _apply_extractor_override(run_cfg: dict, extractor: Optional[str]) -> None:
+    providers = _extractor_providers(extractor)
+    if not providers:
+        return
+    run_cfg["extract"] = dict(run_cfg.get("extract", {}))
+    run_cfg["extract"]["providers"] = providers
+    if extractor in CLAUDE_EXTRACTOR_MODELS:
+        run_cfg["extract"]["claude_model"] = CLAUDE_EXTRACTOR_MODELS[extractor]
+
+
+def _code_version() -> str:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            shell=False,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            shell=False,
+        ).stdout.strip()
+        dirty = bool(status)
+        return f"{commit}{'+dirty' if dirty else ''}" if commit else ""
+    except Exception:
+        return ""
+
+
+def _scrub_secrets(value):
+    if isinstance(value, dict):
+        return {
+            str(k): ("***" if any(s in str(k).lower() for s in ("key", "token", "secret"))
+                else _scrub_secrets(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_secrets(v) for v in value]
+    return value
+
+
+def _config_hash(run_cfg: dict) -> str:
+    payload = json.dumps(_scrub_secrets(run_cfg), sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def _extract_provenance(run_cfg: dict, extractor: Optional[str]) -> dict:
+    from pipeline.extract import PROMPT_VERSION
+
     providers = _extractor_providers(extractor) or (run_cfg.get("extract", {}).get("providers") or [])
     provider = providers[0] if providers else (extractor or "")
     provider_cfg = dict(run_cfg.get("extract", {}).get(provider, {}) or {})
@@ -106,7 +188,10 @@ def _extract_provenance(run_cfg: dict, extractor: Optional[str]) -> dict:
         "extract_model": provider_cfg.get("model") or run_cfg.get("extract", {}).get("claude_model"),
         "extract_base_url": provider_cfg.get("base_url"),
         "extract_config_json": json.dumps(frozen, sort_keys=True),
-        "prompt_version": "extract-v1",
+        "prompt_version": PROMPT_VERSION,
+        "code_version": _code_version(),
+        "config_hash": _config_hash(run_cfg),
+        "server_started_at": APP_STARTED_AT,
     }
 
 
@@ -256,6 +341,9 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
         min_cluster_size=_cl_cfg.get("min_cluster_size", 2),
         min_cohesion=_cl_cfg.get("min_cohesion", 0.55),
         cluster_selection_method=_cl_cfg.get("cluster_selection_method", "leaf"),
+        semantic_refine=_cl_cfg.get("semantic_refine", True),
+        audit_min_cluster_size=_cl_cfg.get("audit_min_cluster_size", 5),
+        extract_cfg=run_cfg.get("extract", {}),
         progress=lambda d, t: _set_stage_progress(5, d, t, "steps")))
     job.update(clusters=cl["clusters"])
 
@@ -284,7 +372,8 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
         from pipeline.s7b_softfilter import softfilter_run
         sf = _stage(job, "stage 7.5 soft-filter",
                     lambda: softfilter_run(store, job_id, run_cfg.get("extract", {}),
-                                           progress=lambda d, t: _set_stage_progress(7, d, t, "themes")),
+                                           progress=lambda d, t: _set_stage_progress(7, d, t, "themes"),
+                                           batch_size=run_cfg.get("soft_filter", {}).get("batch_size", 40)),
                     advisory=True)
         if sf is not None:
             job.update(solvable=sf.get("counts"))
@@ -305,9 +394,11 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
     store.set_stage(job_id, 9, "ranking")
     _set_stage_progress(9, 0, 0, "")
     from pipeline.s9_rank import rank_run
-    _rank_w = run_cfg.get("rank", {}).get("solvable_weights")
+    _rank_cfg = run_cfg.get("rank", {})
+    _rank_w = _rank_cfg.get("solvable_weights")
     ranked = _stage(job, "stage 9 rank",
                     lambda: rank_run(store, job_id, solvable_weights=_rank_w,
+                                     min_support=_rank_cfg.get("min_support"),
                                      progress=lambda d, t: _set_stage_progress(9, d, t, "themes")))
     job.update(ranked=ranked["ranked"], dropped=ranked["dropped"])
 
@@ -323,12 +414,14 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
             top_n=run_cfg.get("ideas", {}).get("top_n", 5),
             cover_top=run_cfg.get("competitors", {}).get("cover_top", 20),
             extract_cfg=run_cfg.get("extract", {}),
+            batch_size=run_cfg.get("competitors", {}).get("batch_size", 20),
             progress=lambda d, t: _set_stage_progress(9, d, t, "themes")), advisory=True)
         if cmp is not None:
             job.update(competitors=cmp.get("competitors"))
             # Re-rank now that saturation reflects real competitor counts.
             ranked = _stage(job, "stage 9.7 re-rank",
                             lambda: rank_run(store, job_id, solvable_weights=_rank_w,
+                                             min_support=_rank_cfg.get("min_support"),
                                              progress=lambda d, t: _set_stage_progress(9, d, t, "themes")))
             job.update(ranked=ranked["ranked"], dropped=ranked["dropped"])
         else:
@@ -378,6 +471,7 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
     from pipeline.s12_report import report_run
     report = _stage(job, "stage 12 report", lambda: report_run(
         store, job_id, str(ROOT / run_cfg.get("report_dir", "reports")),
+        max_ranked_themes=run_cfg.get("report", {}).get("max_ranked_themes", 50),
         progress=lambda d, t: _set_stage_progress(12, d, t, "sections")))
     job.update(report=report["path"])
 
@@ -418,10 +512,7 @@ def _worker(job_id: str, seed: str, limit: int, use_render: bool, use_firecrawl:
             # Auto-track any new corpus seed as a Source so it shows up on the Sources /
             # corpora pages and can be re-collected or analyzed later (platform-neutral).
             store.add_source(uuid.uuid4().hex[:12], seed, None, corpus_key)
-        providers = _extractor_providers(extractor)
-        if providers:  # per-run override of the stage-3 extractor try-list
-            run_cfg["extract"] = dict(run_cfg.get("extract", {}))
-            run_cfg["extract"]["providers"] = providers
+        _apply_extractor_override(run_cfg, extractor)
 
         # Stage 1: collect. Retried with a fresh collector each attempt (browser
         # relaunch), so a Chromium/ICU launch crash self-heals instead of freezing.
@@ -523,8 +614,8 @@ def _worker(job_id: str, seed: str, limit: int, use_render: bool, use_firecrawl:
                     # Discourse, Firecrawl, Playwright). Without this, the 120s watchdog
                     # falsely kills any such collection that simply runs longer than 120s.
                     heartbeat["ts"] = time.monotonic()
-                    # Live 403/429 counter: collectors that adaptively throttle expose
-                    # rate_limit_hits (XenForo today); surface it so the UI can show it.
+                    # Live 403/429 counter: adaptive collectors expose rate_limit_hits
+                    # so the UI can show when the source is throttling collection.
                     rl_hits = getattr(collector, "rate_limit_hits", 0)
                     if rl_hits != job.get("rate_limit_hits"):
                         job.update(rate_limit_hits=rl_hits)
@@ -720,10 +811,7 @@ def _analyze_worker(job_id: str, corpus_key: str, seed: str, extractor: Optional
     try:
         store = Store(DB)
         run_cfg = _run_config(seed, False, False)
-        providers = _extractor_providers(extractor)
-        if providers:
-            run_cfg["extract"] = dict(run_cfg.get("extract", {}))
-            run_cfg["extract"]["providers"] = providers
+        _apply_extractor_override(run_cfg, extractor)
         job.update(status="extracting", stage=3, corpus_key=corpus_key,
                    collector=f"analyze:{corpus_key}")
         store.start_run(job_id, seed, use_corpus=True, extractor=extractor,
@@ -759,10 +847,7 @@ def _merge_analyze_worker(job_id: str, sources: list[dict], extractor: Optional[
     try:
         store = Store(DB)
         run_cfg = _run_config(sources[0]["url"], False, False)
-        providers = _extractor_providers(extractor)
-        if providers:
-            run_cfg["extract"] = dict(run_cfg.get("extract", {}))
-            run_cfg["extract"]["providers"] = providers
+        _apply_extractor_override(run_cfg, extractor)
         job.update(status="extracting", stage=3, collector="analyze:merged",
                    corpus_key=",".join(s.get("corpus_key") or s["url"] for s in sources))
         store.start_run(job_id, seed, use_corpus=True, extractor=extractor,
@@ -1006,6 +1091,9 @@ def _run_status_summary(job_id: str, store) -> dict | None:
         out.setdefault("extract_model", run.get("extract_model"))
         out.setdefault("extract_base_url", run.get("extract_base_url"))
         out.setdefault("prompt_version", run.get("prompt_version"))
+        out.setdefault("code_version", run.get("code_version"))
+        out.setdefault("config_hash", run.get("config_hash"))
+        out.setdefault("server_started_at", run.get("server_started_at"))
         out.setdefault("use_corpus", run.get("use_corpus"))
         out["created_at"] = run.get("created_at")
         out["updated_at"] = run.get("updated_at")
@@ -1030,6 +1118,9 @@ def _run_status_summary(job_id: str, store) -> dict | None:
         "extract_model": out.get("extract_model"),
         "extract_base_url": out.get("extract_base_url"),
         "prompt_version": out.get("prompt_version"),
+        "code_version": out.get("code_version"),
+        "config_hash": out.get("config_hash"),
+        "server_started_at": out.get("server_started_at"),
         "use_corpus": out.get("use_corpus"),
         "new": out.get("new"),
         "threads": out.get("threads"),
@@ -1246,6 +1337,9 @@ def status(job_id: str):
             out["last_topic_found_at"] = out.get("last_topic_found_at") or store.get_last_topic_found_at(job_id, run_row)
             out["created_at"] = run_row.get("created_at")
             out["updated_at"] = run_row.get("updated_at")
+            out["code_version"] = out.get("code_version") or run_row.get("code_version")
+            out["config_hash"] = out.get("config_hash") or run_row.get("config_hash")
+            out["server_started_at"] = out.get("server_started_at") or run_row.get("server_started_at")
         finally:
             store.close()
         return out
@@ -1269,6 +1363,9 @@ def status(job_id: str):
             "extract_model": run.get("extract_model"),
             "extract_base_url": run.get("extract_base_url"),
             "prompt_version": run.get("prompt_version"),
+            "code_version": run.get("code_version"),
+            "config_hash": run.get("config_hash"),
+            "server_started_at": run.get("server_started_at"),
             "last_topic_found_at": last_topic_found_at,
             "created_at": run.get("created_at"), "updated_at": run.get("updated_at"),
             "new": counts["new"], "threads": counts["threads"], "authors": counts["authors"],
@@ -1280,7 +1377,8 @@ def status(job_id: str):
 
 @app.on_event("startup")
 def _startup_reconcile_runs():
-    _reconcile_orphaned_runs()
+    if os.environ.get("SAFARI_DISABLE_AUTO_RESUME", "").lower() not in {"1", "true", "yes"}:
+        _reconcile_orphaned_runs()
     # Backfill Source rows for corpora collected before the sources table existed, so the
     # merged Sources page lists everything (not just newly-added seeds).
     store = Store(DB)
@@ -1299,6 +1397,11 @@ def runs(limit: int = 25, offset: int = 0, q: str = "", status: str = ""):
     total = store.count_runs(q=q, status=status)
     store.close()
     return {"items": items, "total": total}
+
+
+@app.get("/api/extractors")
+def extractors():
+    return {"items": _extractor_options(CFG)}
 
 
 @app.get("/api/active-runs")

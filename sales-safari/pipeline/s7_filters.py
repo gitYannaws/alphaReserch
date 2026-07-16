@@ -5,11 +5,36 @@ reasons as metadata only, so later ranking/reporting can show the caveats
 without excluding any cluster from the pipeline.
 """
 
+import re
+
 FILTER_PATTERNS = {
-    "requires_soc2_hipaa": ("hipaa", "soc2", "soc 2", "patient", "medical record", "phi"),
-    "two_sided_marketplace": ("marketplace", "buyers and sellers", "two-sided", "two sided"),
-    "closed_api_dependency": ("closed api", "private api", "no api", "api access", "locked down"),
-    "regulated_liability": ("legal advice", "financial advice", "tax advice", "regulated", "liability"),
+    "requires_soc2_hipaa": (
+        r"\bhipaa\b",
+        r"\bsoc\s*2\b",
+        r"\bpatients?\b",
+        r"\bmedical records?\b",
+        r"\bprotected health information\b",
+        r"\bphi\b",
+    ),
+    "two_sided_marketplace": (
+        r"\bmarketplace\b",
+        r"\bbuyers and sellers\b",
+        r"\btwo[-\s]sided\b",
+    ),
+    "closed_api_dependency": (
+        r"\bclosed api\b",
+        r"\bprivate api\b",
+        r"\bno api\b",
+        r"\bapi access\b",
+        r"\blocked down\b",
+    ),
+    "regulated_liability": (
+        r"\blegal advice\b",
+        r"\bfinancial advice\b",
+        r"\btax advice\b",
+        r"\bregulated\b",
+        r"\bliability\b",
+    ),
 }
 
 
@@ -26,7 +51,7 @@ def evaluate_cluster(cluster: dict, enabled_filters) -> list:
     reasons = []
     for name in enabled_filters:
         for pattern in FILTER_PATTERNS.get(name, ()):
-            if pattern in text:
+            if re.search(pattern, text):
                 reasons.append(name)
                 break
     return reasons

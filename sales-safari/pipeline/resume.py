@@ -59,10 +59,17 @@ class RunCancelled(Exception):
     pass
 
 
+CLAUDE_EXTRACTOR_MODELS = {
+    "claude": "claude-sonnet-4-6",  # backward-compatible old UI value
+    "claude_sonnet": "claude-sonnet-4-6",
+    "claude_haiku": "claude-haiku-4-5-20251001",
+}
+
+
 def _extractor_providers(name):
-    if name in ("qwen", "glm", "local"):
+    if name in ("qwen", "qwen3", "glm", "local"):
         return [name, "claude"]
-    if name == "claude":
+    if name in CLAUDE_EXTRACTOR_MODELS:
         return ["claude", "codex"]
     return None
 
@@ -86,6 +93,8 @@ def _run_config(base_cfg: dict, run: dict) -> dict:
     if providers:
         cfg["extract"] = dict(cfg.get("extract", {}))
         cfg["extract"]["providers"] = providers
+        if run.get("extractor") in CLAUDE_EXTRACTOR_MODELS:
+            cfg["extract"]["claude_model"] = CLAUDE_EXTRACTOR_MODELS[run["extractor"]]
     return cfg
 
 
@@ -296,6 +305,9 @@ class Runner:
                         min_cluster_size=cc.get("min_cluster_size", 2),
                         min_cohesion=cc.get("min_cohesion", 0.55),
                         cluster_selection_method=cc.get("cluster_selection_method", "leaf"),
+                        semantic_refine=cc.get("semantic_refine", True),
+                        audit_min_cluster_size=cc.get("audit_min_cluster_size", 5),
+                        extract_cfg=self.cfg.get("extract", {}),
                         progress=lambda d, t: self._set_progress(5, d, t, "steps"))
         return f"clusters={r['clusters']}"
 
@@ -314,7 +326,8 @@ class Runner:
     def _softfilter(self, store):
         from pipeline.s7b_softfilter import softfilter_run
         sf = softfilter_run(store, self.job_id, self.cfg.get("extract", {}),
-                            progress=lambda d, t: self._set_progress(7, d, t, "themes"))
+                            progress=lambda d, t: self._set_progress(7, d, t, "themes"),
+                            batch_size=self.cfg.get("soft_filter", {}).get("batch_size", 40))
         return f"solvable={sf.get('counts')}"
 
     def _compete(self, store):
@@ -325,8 +338,10 @@ class Runner:
 
     def _rank(self, store):
         from pipeline.s9_rank import rank_run
+        rank_cfg = self.cfg.get("rank", {})
         r = rank_run(store, self.job_id,
-                     solvable_weights=self.cfg.get("rank", {}).get("solvable_weights"),
+                     solvable_weights=rank_cfg.get("solvable_weights"),
+                     min_support=rank_cfg.get("min_support"),
                      progress=lambda d, t: self._set_progress(9, d, t, "themes"))
         return f"ranked={r['ranked']} dropped={r['dropped']}"
 
@@ -337,10 +352,13 @@ class Runner:
                               top_n=self.cfg.get("ideas", {}).get("top_n", 5),
                               cover_top=self.cfg.get("competitors", {}).get("cover_top", 20),
                               extract_cfg=self.cfg.get("extract", {}),
+                              batch_size=self.cfg.get("competitors", {}).get("batch_size", 20),
                               progress=lambda d, t: self._set_progress(9, d, t, "themes"))
         # Re-rank so backfilled saturation + solvability move the order before ideas/reviews.
+        rank_cfg = self.cfg.get("rank", {})
         rank_run(store, self.job_id,
-                 solvable_weights=self.cfg.get("rank", {}).get("solvable_weights"),
+                 solvable_weights=rank_cfg.get("solvable_weights"),
+                 min_support=rank_cfg.get("min_support"),
                  progress=lambda d, t: self._set_progress(9, d, t, "themes"))
         return f"competitors={cmp.get('competitors')} covered={cmp.get('covered')} re-ranked"
 
@@ -377,6 +395,7 @@ class Runner:
     def _report(self, store):
         from pipeline.s12_report import report_run
         r = report_run(store, self.job_id, str(ROOT / self.cfg.get("report_dir", "reports")),
+                       max_ranked_themes=self.cfg.get("report", {}).get("max_ranked_themes", 50),
                        progress=lambda d, t: self._set_progress(12, d, t, "sections"))
         return f"report={r['path']}"
 

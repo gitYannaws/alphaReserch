@@ -137,7 +137,8 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
         <select id="extractor">
           <option value="qwen" selected>Qwen 2.5 14B (local)</option>
           <option value="qwen3">Qwen3 14B (local)</option>
-          <option value="claude">Claude CLI</option>
+          <option value="claude_sonnet">Claude Sonnet 4.6 (claude-sonnet-4-6)</option>
+          <option value="claude_haiku">Claude Haiku 4.5 (claude-haiku-4-5-20251001)</option>
           <option value="glm">GLM (local)</option>
         </select>
       </div>
@@ -214,6 +215,9 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
       Current URL:
       <a id="currentUrl" href="#" target="_blank" rel="noopener noreferrer"></a>
     </div>
+    <div class="small" id="extractorModelWrap" style="margin-top:6px;display:none">
+      Extractor: <span id="extractorModel"></span>
+    </div>
     <div id="err" class="err"></div>
   </div>
 
@@ -288,7 +292,7 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
 </main>
 
 <script>
-let RUNS=[], RUNS_TOTAL=0, RUN_PAGE_SIZE=25, RUN_OFFSET=0;
+let RUNS=[], RUNS_TOTAL=0, RUN_PAGE_SIZE=25, RUN_OFFSET=0, EXTRACTOR_OPTIONS={};
 const STEPS = ["collect","store","extract","embed","cluster","score","warnings","software fit","compete","rank","competitors","reviews","ideas","validate","report"];
 const STEP_FOR_STATUS = {
   starting:0, collecting:0, "collecting-paused":0, storing:1,
@@ -366,6 +370,29 @@ function fmtAgo(s){
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
 }
+function extractorLabelFromValue(value){
+  return EXTRACTOR_OPTIONS[value]?.label || value || "";
+}
+function extractorModelText(run){
+  if(run?.extract_model){
+    if(run.extract_provider === "claude") return `Claude CLI --model ${run.extract_model}`;
+    return run.extract_model;
+  }
+  return extractorLabelFromValue(run?.extractor || run?.extract_provider);
+}
+async function loadExtractorOptions(){
+  try{
+    const data = await (await fetch("/api/extractors")).json();
+    EXTRACTOR_OPTIONS = {};
+    (data.items || []).forEach(item => { EXTRACTOR_OPTIONS[item.value] = item; });
+    const sel = $("extractor"), cur = sel.value;
+    [...sel.options].forEach(opt => {
+      const label = extractorLabelFromValue(opt.value);
+      if(label) opt.textContent = label;
+    });
+    sel.value = cur;
+  }catch(e){}
+}
 function setRunControls(status){
   const active = status && !TERMINAL.has(status);
   $("run").disabled = !!active;
@@ -440,7 +467,7 @@ function drawPipe(stage,status){
 }
 drawPipe(1,"");
 setRunControls("");
-loadRuns();
+loadExtractorOptions().then(loadRuns);
 
 async function start(){
   const seed=$("seed").value.trim(); if(!seed) return;
@@ -512,6 +539,9 @@ async function tick(job){
   const rl=j.rate_limit_hits ?? 0;
   $("sRateLimit").textContent=rl;
   $("sRateLimit").style.color = rl>0 ? "var(--err)" : "";
+  const extractorText = extractorModelText(j);
+  $("extractorModelWrap").style.display = extractorText ? "block" : "none";
+  $("extractorModel").textContent = extractorText;
   $("badge").className="badge "+visualStatus(j);
   $("badge").textContent=statusText(j);
   setRunControls(j.status);
@@ -551,7 +581,7 @@ function renderRuns(){
     <td title="${esc(r.seed_url)}">${esc(shortSeed(r.seed_url))}</td>
     <td><span class="badge ${esc(r.status)}">${esc(r.status)}</span></td>
     <td class="dim">${esc(fmtWhen(r.updated_at || r.created_at))}</td>
-    <td class="dim">${esc(`${r.doc_count || 0} posts / ${r.pain_count || 0} pains / ${r.cluster_count || 0} themes / ${r.idea_count || 0} ideas`)}</td>
+    <td class="dim">${esc(`${r.doc_count || 0} posts / ${r.pain_count || 0} pains / ${r.cluster_count || 0} themes / ${r.idea_count || 0} ideas`)}<br><span title="Exact extractor model">${esc(extractorModelText(r))}</span></td>
     <td style="white-space:nowrap">
       <button class="secondary" data-run="${esc(r.job_id)}">Open</button>
       <button class="secondary warn" data-del="${esc(r.job_id)}" data-seed="${esc(shortSeed(r.seed_url))}" data-status="${esc(r.status)}">Delete</button>

@@ -14,6 +14,13 @@ class FallbackCollector(Collector):
         self.source_type = primary.source_type
         self.granularity = getattr(primary, "granularity", "post")
 
+    @property
+    def rate_limit_hits(self) -> int:
+        return (
+            int(getattr(self.primary, "rate_limit_hits", 0) or 0)
+            + int(getattr(self.secondary, "rate_limit_hits", 0) or 0)
+        )
+
     def collect(self, seed_url: str, limit: int) -> Iterator[Document]:
         yielded = 0
         try:

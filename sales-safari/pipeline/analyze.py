@@ -23,23 +23,31 @@ def analyze_run(store, run_id: str, cfg: dict, root: Path = Path(".")) -> dict:
     from pipeline.s10_ideas import ideas_run
     from pipeline.s11_validation import validation_run
     from pipeline.s12_report import report_run
-    rank_weights = cfg.get("rank", {}).get("solvable_weights")
+    rank_cfg = cfg.get("rank", {})
+    rank_weights = rank_cfg.get("solvable_weights")
 
     stats = {
         "demand": demand_run(store, run_id, cfg.get("scoring_weights", {})),
         "filters": filters_run(store, run_id, cfg.get("hard_filters", [])),
     }
     if cfg.get("soft_filter", {}).get("enabled", True):
-        stats["soft_filter"] = softfilter_run(store, run_id, cfg.get("extract", {}))
+        stats["soft_filter"] = softfilter_run(
+            store, run_id, cfg.get("extract", {}),
+            batch_size=cfg.get("soft_filter", {}).get("batch_size", 40))
     stats["competition"] = compete_run(store, run_id, cfg.get("competitor_sources", []))
-    stats["rank"] = rank_run(store, run_id, solvable_weights=rank_weights)
+    stats["rank"] = rank_run(
+        store, run_id, solvable_weights=rank_weights,
+        min_support=rank_cfg.get("min_support"))
     if cfg.get("competitors", {}).get("enabled", True):
         stats["competitors"] = competitors_run(
             store, run_id,
             top_n=cfg.get("ideas", {}).get("top_n", 5),
             cover_top=cfg.get("competitors", {}).get("cover_top", 20),
-            extract_cfg=cfg.get("extract", {}))
-        stats["rank_after_competitors"] = rank_run(store, run_id, solvable_weights=rank_weights)
+            extract_cfg=cfg.get("extract", {}),
+            batch_size=cfg.get("competitors", {}).get("batch_size", 20))
+        stats["rank_after_competitors"] = rank_run(
+            store, run_id, solvable_weights=rank_weights,
+            min_support=rank_cfg.get("min_support"))
     if cfg.get("reviews", {}).get("enabled", True):
         rcfg = cfg.get("reviews", {})
         stats["reviews"] = reviews_run(
@@ -50,7 +58,9 @@ def analyze_run(store, run_id: str, cfg: dict, root: Path = Path(".")) -> dict:
             max_per_competitor=rcfg.get("max_per_competitor", 25))
     stats["ideas"] = ideas_run(store, run_id, cfg.get("ideas", {}).get("top_n", 5))
     stats["validation"] = validation_run(store, run_id)
-    stats["report"] = report_run(store, run_id, str(root / cfg.get("report_dir", "reports")))
+    stats["report"] = report_run(
+        store, run_id, str(root / cfg.get("report_dir", "reports")),
+        max_ranked_themes=cfg.get("report", {}).get("max_ranked_themes", 50))
     return stats
 
 

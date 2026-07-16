@@ -16,9 +16,11 @@ collection:
   thread_url_patterns: ["/t/", "/threads/", "/comments/"]  # Common topic/thread URL markers
   same_domain_only: true
   fallback: xenforo             # none | firecrawl | playwright | auto | xenforo | render
-  # Adaptive rate-limit control for the XenForo collector. Each 403/429 multiplies the
-  # inter-request delay by `backoff` (capped at max_multiplier) and retries the same
-  # request after an escalating cooldown; successes decay the multiplier back toward 1.
+  # Adaptive rate-limit control for unknown rendered/static forums (XenForo + Playwright).
+  # Each 403/429 multiplies the inter-request delay by `backoff` (capped at
+  # max_multiplier) and retries the same request after an escalating cooldown;
+  # successes decay the multiplier back toward 1. Reddit uses its own conservative
+  # fixed-delay/cooldown settings below.
   rate_limit:
     backoff: 1.6            # delay multiplier bump per 403/429
     max_multiplier: 8.0    # cap on the multiplier
@@ -123,6 +125,10 @@ cluster:
   min_cluster_size: 2
   cluster_selection_method: leaf   # leaf = finer themes; eom = few big blobs (old default)
   min_cohesion: 0.55               # split any cluster looser than this (grab-bag guard)
+  # Embeddings can still mix different pains with the same broad travel/dating context.
+  # Audit clusters large enough to rank, split only genuinely shared buyer problems.
+  semantic_refine: true
+  audit_min_cluster_size: 5
 
 # §6 demand scoring weights
 scoring_weights:
@@ -145,11 +151,15 @@ hard_filters:
 # hardware pains don't outrank software-shaped ones.
 rank:
   solvable_weights: {yes: 1.0, partial: 0.6, no: 0.25, unknown: 0.5}
+  # Tiny/single-thread clusters stay in the database but do not become ranked
+  # market opportunities or idea seeds.
+  min_support: {evidence_count: 5, distinct_authors: 4, distinct_threads: 3}
 
 # §7.5 soft filter: LLM tags each theme software-solvable (yes/partial/no) for UI color.
-# Advisory only - never drops. One extractor call per run.
+# Advisory only - never drops. Batched so large runs do not exceed context windows.
 soft_filter:
   enabled: true
+  batch_size: 40
 
 # §8 competitor discovery sources
 competitor_sources: [web, g2, capterra, producthunt, appstore]
@@ -158,8 +168,9 @@ competitor_sources: [web, g2, capterra, producthunt, appstore]
 # with a review_domain to point the low-star review miner at. Advisory - never drops.
 competitors:
   enabled: true
-  cover_top: 0    # 0 = ALL themes (one batched call). Covering all avoids the gap where the
+  cover_top: 0    # 0 = ALL themes. Covering all avoids the gap where the
                   # solvability re-rank promotes an uncovered theme into the final top-N.
+  batch_size: 20
 
 # §9.6 review mining: pull 1-2 star app-store reviews of each competitor via free public
 # Apple endpoints (Search API + customer-reviews RSS). No key, no scraping. Advisory.
@@ -184,3 +195,5 @@ ideas:
 
 # §12 report output
 report_dir: reports
+report:
+  max_ranked_themes: 50

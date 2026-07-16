@@ -9,8 +9,9 @@ INTENSITY_TERMS = {
     "annoying", "problem", "issue", "hard", "difficult", "slow",
 }
 WTP_TERMS = {
-    "pay", "paid", "price", "cost", "expensive", "subscription", "buy",
-    "purchased", "budget", "invoice", "business", "client", "customers",
+    "pay", "paid", "paying", "price", "pricing", "cost", "costs", "expensive",
+    "subscription", "fee", "fees", "buy", "bought", "purchased", "purchase",
+    "budget", "invoice", "refund",
 }
 REACHABILITY_TERMS = {
     "forum", "community", "makerspace", "shop", "etsy", "client",
@@ -27,7 +28,12 @@ def _texts(cluster: dict):
 
 def _term_hits(text: str, terms: set) -> list:
     low = text.lower()
-    return sorted(t for t in terms if t in low)
+    hits = []
+    for term in terms:
+        pattern = r"(?<![a-z0-9])" + re.escape(term).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
+        if re.search(pattern, low):
+            hits.append(term)
+    return sorted(hits)
 
 
 def _term_score(text: str, terms: set, base: float = 2.0) -> tuple[float, list]:
@@ -89,7 +95,11 @@ def _recurrence(cluster: dict) -> tuple[float, dict]:
     pains = cluster["pains"]
     distinct_authors = int(cluster.get("distinct_authors") or 0)
     evidence_count = len(pains)
-    sources = {p.get("source_permalink") for p in pains if p.get("source_permalink")}
+    threads = {
+        p.get("thread_url") or p.get("title") or p.get("source_permalink")
+        for p in pains
+        if p.get("thread_url") or p.get("title") or p.get("source_permalink")
+    }
     workaround_count = sum(1 for p in pains if (p.get("workaround") or "").strip())
     repeated_phrases = [
         key for key, count in Counter(_token_key(p.get("workflow_pain") or p.get("complaint") or "")
@@ -98,14 +108,14 @@ def _recurrence(cluster: dict) -> tuple[float, dict]:
     ]
     score = min(10.0,
                 distinct_authors * 1.8
-                + min(2.0, len(sources) * 0.5)
+                + min(2.0, len(threads) * 0.7)
                 + min(2.0, workaround_count * 0.6)
                 + min(2.0, len(repeated_phrases) * 0.8)
                 + max(0, evidence_count - distinct_authors) * 0.3)
     return round(score, 2), {
         "distinct_authors": distinct_authors,
         "evidence_count": evidence_count,
-        "distinct_sources": len(sources),
+        "distinct_threads": len(threads),
         "workaround_count": workaround_count,
         "repeated_patterns": [" ".join(k) for k in repeated_phrases[:3]],
         "quotes": _quotes_for_terms(cluster, [], limit=3),
