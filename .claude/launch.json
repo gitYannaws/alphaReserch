@@ -6,6 +6,12 @@
       "runtimeExecutable": "sales-safari/.venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "uvicorn", "webapp.app:app", "--app-dir", "sales-safari", "--port", "8000"],
       "port": 8000
+    },
+    {
+      "name": "bench-static",
+      "runtimeExecutable": "sales-safari/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "http.server", "8010", "--directory", "sales-safari"],
+      "port": 8010
     }
   ]
 }

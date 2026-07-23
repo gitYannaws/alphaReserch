@@ -69,7 +69,7 @@ def _normalize_reddit_sort_plan(items, default_time_filter: str) -> list[tuple[s
 
 
 def pick_collector(seed: str, cfg: dict, known_thread_urls=None, corpus_mode: str = "",
-                   progress_cb=None, extra_thread_urls=None):
+                   progress_cb=None, extra_thread_urls=None, known_thread_stats=None):
     """Discourse if detected; else configured open-forum fallback."""
     coll = cfg.get("collection", {})
     seed = normalize_seed(seed)
@@ -81,6 +81,22 @@ def pick_collector(seed: str, cfg: dict, known_thread_urls=None, corpus_mode: st
     # Reddit is a per-comment source with its own free public JSON; route by host before
     # the generic Discourse probe (which would 404 on reddit and fall through to scraping).
     if RedditCollector.is_reddit(seed):
+        # HISTORICAL runs swap the slow polite crawl for the Arctic Shift archive when
+        # enabled: full subreddit history, exact timestamps + scores, zero reddit.com
+        # requests. Refresh/backfill runs keep the live crawl (the archive trails the
+        # fresh edge). Opt-in via collection.arctic_shift.enabled.
+        azs = coll.get("arctic_shift", {})
+        if azs.get("enabled") and corpus_mode == "historical":
+            from pipeline.collectors.arcticshift_collector import ArcticShiftCollector
+            return ArcticShiftCollector(
+                api_base=azs.get("api_base") or None,
+                page_size=azs.get("page_size", 100),
+                pause=azs.get("pause", 0.7),
+                min_comment_len=coll.get("reddit", {}).get("min_comment_len", 20),
+                max_comments=azs.get("max_comments", 0),
+                dump_dir=azs.get("dump_dir", ""),
+                progress_cb=progress_cb,
+            ), "arctic-shift"
         rc = coll.get("reddit", {})
         seed_sort, seed_time_filter = _seed_listing_prefs(seed)
         sort = seed_sort or rc.get("sort", "hot")
@@ -132,9 +148,16 @@ def pick_collector(seed: str, cfg: dict, known_thread_urls=None, corpus_mode: st
         ), "reddit"
 
     if DiscourseCollector.is_discourse(seed):
+        dc = coll.get("discourse", {})
         return DiscourseCollector(
             keywords=cfg.get("keywords"),
             max_pages=coll.get("max_pages", 3),
+            min_post_len=dc.get("min_post_len", 25),
+            max_posts_per_thread=dc.get("max_posts_per_thread", 200),
+            post_batch=dc.get("post_batch", 100),
+            # Delta refresh: with corpus stats the collector skips topics whose upstream
+            # last-post time hasn't moved past what we already hold.
+            known_thread_stats=known_thread_stats,
         ), "discourse"
 
     def firecrawl():

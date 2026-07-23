@@ -10,6 +10,13 @@ retry:
   attempts: 3        # total tries per stage
   base_delay: 5      # backoff seconds, doubles each retry (5 -> 10 -> 20)
 
+# Kickoff queue: sources on DIFFERENT domains collect in parallel lanes (independent rate
+# limits); sources on the same domain stay strictly sequential inside their lane, so
+# per-domain politeness is identical to the old fully-serial queue. max_lanes bounds
+# concurrency - each render-capable lane may hold a Chromium (~300MB).
+kickoff:
+  max_lanes: 3
+
 collection:
   max_threads: 100
   thread_url_pattern: "/t/"     # Discourse thread path; adjust per forum
@@ -28,6 +35,29 @@ collection:
     retries: 2             # adaptive retries of a 403'd request before skipping the thread
     cooldown_seconds: 5.0  # base pause on a 403 (scaled by the current multiplier)
   # render = auto-pick renderer: XenForo if the board is XenForo, else Playwright (GUI "Render" toggle)
+  # Discourse: auto-detected by probe, free public JSON, per-post authored + like counts.
+  # /t/{id}.json embeds only the first ~20 posts, so the rest are fetched by id from
+  # /t/{id}/posts.json in batches (the endpoint accepts >=200 post_ids[] per call).
+  discourse:
+    min_post_len: 25
+    max_posts_per_thread: 200   # ids fetched per topic (mirrors reddit.max_comments_per_thread)
+    post_batch: 100             # post_ids[] per posts.json call
+  # Arctic Shift: community archive of all public Reddit (Pushshift successor). When
+  # enabled, HISTORICAL runs (the GUI "historical" toggle) fetch the subreddit's full
+  # history from the archive instead of the slow polite old.reddit crawl - exact
+  # created_utc, score on every post/comment (feeds the stage-6 upvote signal), no
+  # reddit.com requests, no ~1000-item listing cap. Refresh/backfill runs keep the live
+  # crawl (the archive trails the fresh edge by minutes-to-weeks). Trade-off stated
+  # plainly: third-party archive, standard in research, never blessed by Reddit; it also
+  # preserves since-deleted content - the salted-author_hash privacy rule matters extra.
+  arctic_shift:
+    enabled: true
+    api_base: https://arctic-shift.photon-reddit.com
+    page_size: 100        # API max
+    pause: 0.7            # seconds between API pages ("a couple req/s" is their stated ok)
+    max_comments: 0       # total comment cap per run; 0 = full history
+    dump_dir: ""          # optional: dir of downloaded dumps (download tool / torrent
+                          # repacks, .zst or NDJSON); matching files beat the API
   # Reddit: auto-detected by host, uses free public JSON (per-comment, authored).
   reddit:
     sort: hot                   # hot | top | new | controversial
@@ -66,11 +96,25 @@ keywords: []
 # §3 pain extraction
 # providers = ordered try-list. First that succeeds wins; a fallback-eligible error
 # (see fallback_on) advances to the next. The GUI "Extractor" dropdown overrides this
-# per-run: Claude -> [claude, codex]; Qwen 2.5 -> [qwen, claude];
-# Qwen3 -> [qwen3, claude]; GLM -> [glm, claude].
+# per-run: Claude -> [claude, codex]; ChatGPT/Codex CLI variants -> [codex];
+# Qwen 2.5 -> [qwen, claude]; Qwen3 -> [qwen3, claude]; GLM -> [glm, claude].
 extract:
-  batch_size: 6
+  batch_size: 6               # upper bound on posts per LLM call
+  # Truncation guard: a batch is also capped by total chars, so a local model's context
+  # window (Ollama default ~4096 tokens) never silently drops the tail posts of a big batch -
+  # a recall leak worst on long, pain-dense posts. ~10000 chars ≈ 2500 tokens, safe under a
+  # 4096 context with room for the prompt + output. Raise both if you raise qwen.num_ctx.
+  max_batch_chars: 10000      # greedy char budget per batch (across posts)
+  max_doc_chars: 10000        # a single longer post is capped to this (span still validates)
   providers: [qwen, claude]   # local qwen primary; Claude fallback if endpoint down/errors
+  # providers_mode: how `providers` is used.
+  #   fallback (default) = first provider that succeeds wins (see comment above).
+  #   union              = run EVERY provider, pool + dedup their pains by span overlap.
+  #     Higher recall (complementary models find different pains: qwen2.5+qwen3 lifted
+  #     recall 32%->46% at ~+1 false-positive; see docs/model-extraction-benchmark-2026-07-16.md).
+  #     Costs more latency, and cloud providers in the list bill on every batch.
+  #     For a free recall boost set: providers: [qwen, qwen3]  +  providers_mode: union
+  providers_mode: fallback
   claude_model: sonnet
   fallback_on: ["API 429", "429", "monthly usage limit", "usage limit",
                 "connection error", "connection refused", "timed out", "timeout"]
@@ -85,6 +129,10 @@ extract:
     model: qwen2.5:14b-instruct           # ~9GB Q4, fits 16GB VRAM; `ollama list` for options
     api_key: ""                           # blank ok for local; Ollama ignores it
     temperature: 0
+    num_ctx: 16384                        # raise Ollama's ~4096 default (qwen2.5 supports 32k);
+                                          # lets bigger batches fit. Sent as options.num_ctx;
+                                          # ignored by servers that don't support it (batching
+                                          # still guards truncation regardless).
   qwen3:
     base_url: http://localhost:11434/v1
     model: qwen3:14b
@@ -97,7 +145,8 @@ extract:
     temperature: 0
   codex:
     # Uses Codex CLI via npm. {output} is replaced with a temp file path.
-    command:
+    model: gpt-5.6-terra
+    command: &codex_cmd
       - npx.cmd
       - -y
       - "@openai/codex"
@@ -110,6 +159,65 @@ extract:
       - --output-last-message
       - "{output}"
       - "-"
+  # gpt-5.6-sol at max reasoning effort. Separate block so the default `codex` stays cheap.
+  # NOTE: the CLI does NOT validate model_reasoning_effort - it prints back whatever string
+  # you pass ("reasoning effort: banana") and only the API rejects it. So a typo here fails
+  # at request time, not at launch. Verified accepted: low | high | xhigh | max.
+  codex_sol:
+    model: gpt-5.6-sol
+    command:
+      - npx.cmd
+      - -y
+      - "@openai/codex"
+      - exec
+      - --skip-git-repo-check
+      - --ephemeral
+      - --ignore-rules
+      - --sandbox
+      - read-only
+      - -c
+      - model_reasoning_effort=max
+      - --output-last-message
+      - "{output}"
+      - "-"
+  # One block per GUI extractor choice. Key == the webapp's extractor value, so a bench key
+  # and a dropdown value are the same string. Same command as `codex` (aliased, not copied);
+  # only `model` differs. The CLI does NOT validate -m: an unknown/retired model id fails at
+  # request time, not at launch, so a new entry here is unproven until it is actually run.
+  codex_gpt56_luna:
+    model: gpt-5.6-luna
+    command: *codex_cmd
+  codex_gpt55:
+    model: gpt-5.5
+    command: *codex_cmd
+  codex_gpt54:
+    model: gpt-5.4
+    command: *codex_cmd
+  codex_gpt54_mini:
+    model: gpt-5.4-mini
+    command: *codex_cmd
+
+# §3b verify — second-pass precision gate. Stage 3 casts a wide net (recall); this classifies
+# each candidate pain's TYPE, then keep_types decides which survive to clustering. Runs only on
+# candidates (~10% of docs), so a strong model here is affordable. Rejected pains stay in the DB
+# (verified=0) and are withheld by get_pains; re-tune keep_types cheaply with store.reapply_verify_policy
+# (no LLM). A verify outage is non-fatal: unjudged candidates stay kept.
+verify:
+  # ON: stage 3a runs prompt extract-v3, which casts a wide net on purpose and defers
+  # precision to this stage. Measured on the gold set: qwen2.5 scores 22% precision alone
+  # vs 60% with verify. See docs/model-extraction-benchmark-2026-07-18.md.
+  enabled: true
+  provider: claude          # judge via `claude -p`; claude=CLI Claude, or a local name (qwen/glm)
+  model: sonnet             # claude_model for the judge; strong model, low call volume
+  batch_size: 10            # candidates per judge call
+  # Which pain types survive to stages 4-12. Types: product_friction, wish, cost_complaint,
+  # social_complaint, advice_opinion, off_topic. The keep/drop line is GENUINE PAIN vs NOISE,
+  # not product-shaped vs not: a social gripe ("Sweden's expensive", dating frustration) is a
+  # real pain and can become a product ("product-shaped" is founder imagination, rarely in the
+  # raw quote). Solvability is judged later, at the THEME level (stage 7b soft-filter + idea
+  # gen), where a cluster reveals a market. So keep every genuine-pain type; reject only true
+  # noise (advice to others, jokes/off-topic). pain_type rides downstream as a weighting signal.
+  keep_types: [product_friction, wish, cost_complaint, social_complaint]
 
 # §4 embeddings — bge-small = fast/small; swap to BAAI/bge-large-en-v1.5 (1.3GB) for quality
 embed_model: BAAI/bge-small-en-v1.5
@@ -127,7 +235,23 @@ cluster:
   min_cohesion: 0.55               # split any cluster looser than this (grab-bag guard)
   # Embeddings can still mix different pains with the same broad travel/dating context.
   # Audit clusters large enough to rank, split only genuinely shared buyer problems.
+  #
+  # OFF (2026-07-18) - MEASURED to destroy essentially all rankable themes. Sampling 40
+  # clusters that cleared stage-9 min_support and running the real auditor over them:
+  # 0 of 40 survived. It does not merely split - it OMITS members ("omit unrelated or
+  # one-off pains") and is called with min_cluster_size=2, so it emits groups of median
+  # size 2 while rank demands >=5 evidence and >=4 distinct authors. Unrankable by
+  # construction. Run 9af5b27db46e: 213 qualifying clusters before audit -> 8 after.
+  # Its purpose (stop grab-bag megaclusters) is already served by cluster_selection_method
+  # =leaf, under which the largest cluster here is 28 pains. min_support at rank remains
+  # the real quality gate. Re-enable only as a LABEL-ONLY pass that never drops members.
   semantic_refine: true
+  # LABEL-ONLY: the audit names a theme but never drops members. Full refine mode was
+  # measured to destroy every rankable theme (0 of 40 sampled survived) because it omits
+  # "one-off" pains and emits groups of median size 2, while rank demands >=5 evidence /
+  # >=4 authors. Label-only keeps 213 rankable themes AND readable names - without it,
+  # labels fall back to a raw member quote ("Now I am really confused.").
+  semantic_label_only: true
   audit_min_cluster_size: 5
 
 # §6 demand scoring weights
@@ -139,16 +263,26 @@ scoring_weights:
   recurrence_score: 3
 
 # §7 warning flags (advisory only; never drops by itself)
+# Advisory warning tags. Despite the name these NEVER drop a theme - they annotate it, and
+# are now produced by stage 7b alongside software-fit (the separate stage-7 pass was folded
+# in; it was free regex over the same clusters). Stored as soft_filters.warnings.
+# The first four are B2B-SaaS shaped and fired on only 5 of 920 themes (0.5%) against an
+# expat/travel corpus; the rest are domain-relevant. Trim to match the niche you mine.
 hard_filters:
   - requires_soc2_hipaa
   - two_sided_marketplace
   - closed_api_dependency
   - regulated_liability
+  - visa_immigration_process
+  - banking_or_payments
+  - requires_in_person
+  - language_barrier
+  - physical_logistics
 
-# §9 rank = demand * persistence / (1 + saturation) * solvable_weight.
-# Saturation is backfilled from real competitor counts (see competitors.cover_top);
-# solvable_weight down-weights themes a pure software product can't solve, so social /
-# hardware pains don't outrank software-shaped ones.
+# §9 rank = demand * persistence * solvable_weight.
+# Saturation is display-only; competitor discovery runs after idea drafting and no longer
+# penalizes rank. solvable_weight down-weights themes a pure software product can't solve,
+# so social / hardware pains don't outrank software-shaped ones.
 rank:
   solvable_weights: {yes: 1.0, partial: 0.6, no: 0.25, unknown: 0.5}
   # Tiny/single-thread clusters stay in the database but do not become ranked
@@ -159,18 +293,36 @@ rank:
 # Advisory only - never drops. Batched so large runs do not exceed context windows.
 soft_filter:
   enabled: true
-  batch_size: 40
+  batch_size: 40            # upper bound on themes per call
+  # Themes are also packed by CHARS: 40 themes x ~6 pains was ~15k tokens against a local
+  # model whose default context is ~4096, so the prompt truncated and 632 of 642 themes came
+  # back unclassified (silently "unknown", killing the solvable_weight signal at rank).
+  max_batch_chars: 8000
 
 # §8 competitor discovery sources
 competitor_sources: [web, g2, capterra, producthunt, appstore]
 
-# §9.5 competitor discovery: LLM names real existing products per top-N theme,
-# with a review_domain to point the low-star review miner at. Advisory - never drops.
+# §9b competitor discovery: names the real products that already compete with each DRAFTED
+# IDEA (runs after stage 10a, not before rank). Advisory - never drops, never moves rank.
 competitors:
   enabled: true
-  cover_top: 0    # 0 = ALL themes. Covering all avoids the gap where the
-                  # solvability re-rank promotes an uncovered theme into the final top-N.
   batch_size: 20
+  # Needs world knowledge of real products, which a small local model does not have: on run
+  # 9af5b27db46e qwen2.5:14b found competitors for 8 of 642 themes and named mostly
+  # magazines. Only ~top_n ideas are covered now, so a strong model is cheap. Blank ("")
+  # falls back to the run's own extract.providers.
+  model: claude-sonnet-5
+  # Grounding gate: every candidate's URL must answer over HTTP or it is dropped. This is
+  # what stops hallucinated products, since the model names them from memory.
+  verify_urls: true
+  url_timeout: 8
+
+# §10b idea brief: builds each idea out using its competitors + their 1-2 star reviews.
+# The wedge must come from a real review quote or a stated competitor weakness; briefs with
+# no surviving quote are flagged has_review_evidence=false rather than being padded.
+brief:
+  enabled: true
+  model: claude-sonnet-5
 
 # §9.6 review mining: pull 1-2 star app-store reviews of each competitor via free public
 # Apple endpoints (Search API + customer-reviews RSS). No key, no scraping. Advisory.
@@ -192,6 +344,10 @@ discover:
 # §10 idea generation
 ideas:
   top_n: 5
+  # LLM that synthesises ranked themes into product ideas (stage 10). Any Claude CLI model
+  # alias/id. Blank ("") = fall back to the default extract.providers instead of a strong
+  # model. Not hardcoded - change or clear it here.
+  model: claude-sonnet-5
 
 # §12 report output
 report_dir: reports

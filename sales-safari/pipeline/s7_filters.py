@@ -1,8 +1,16 @@
-"""Stage 7: advisory filter tags.
+"""Advisory warning tags for a theme (regex, free).
 
-Historically this stage could drop clusters outright. We now keep the matching
-reasons as metadata only, so later ranking/reporting can show the caveats
-without excluding any cluster from the pipeline.
+No longer its own pipeline stage: `softfilter_run` (stage 7b) calls `evaluate_cluster` and
+stores the hits as `soft_filters.warnings`, so warnings + software-fit are one advisory pass.
+`filters_run` is retained only for the standalone `analyze.py` path.
+
+Historically this could drop clusters outright. Reasons are metadata only - ranking/reporting
+show the caveat without excluding the theme.
+
+NOTE on coverage: the first four groups are B2B-SaaS shaped and fired on just 5 of 920 themes
+(0.5%) against an expat/travel/dating corpus. The groups below them are the domain-relevant
+counterparts. Patterns are matched against the cluster's pain text, so they only catch what
+posters actually say.
 """
 
 import re
@@ -34,6 +42,45 @@ FILTER_PATTERNS = {
         r"\btax advice\b",
         r"\bregulated\b",
         r"\bliability\b",
+    ),
+    # ---- domain-relevant (expat / travel / nomad / dating corpora) ----
+    "visa_immigration_process": (
+        r"\bvisas?\b",
+        r"\bimmigration\b",
+        r"\bresidency\b",
+        r"\bwork permit\b",
+        r"\bembassy\b",
+        r"\bconsulate\b",
+        r"\bborder run\b",
+    ),
+    "banking_or_payments": (
+        r"\bbank account\b",
+        r"\bwire transfer\b",
+        r"\bremittance\b",
+        r"\bcash only\b",
+        r"\bexchange rate\b",
+        r"\bwestern union\b",
+    ),
+    "requires_in_person": (
+        r"\bin person\b",
+        r"\bface to face\b",
+        r"\bshow up\b",
+        r"\bnotari[sz]e\b",
+        r"\bappointment\b",
+    ),
+    "language_barrier": (
+        r"\blanguage barrier\b",
+        r"\bdon'?t speak\b",
+        r"\btranslation\b",
+        r"\benglish speaking\b",
+    ),
+    "physical_logistics": (
+        r"\bshipping\b",
+        r"\bcustoms\b",
+        r"\bluggage\b",
+        r"\bapartment\b",
+        r"\bhousing\b",
+        r"\blandlord\b",
     ),
 }
 

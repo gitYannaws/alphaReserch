@@ -17,6 +17,10 @@
   label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin-bottom:8px}
   .row{display:flex;gap:12px;align-items:end;flex-wrap:wrap}
   input,select{background:#0c0d11;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:10px 12px;font-size:14px}
+  /* a <select> sizes to its longest option (model names run ~338px) and would otherwise
+     blow out its container; clamp it and let wide tables scroll instead of bleeding out */
+  input,select{max-width:100%}
+  .table-wrap{overflow-x:auto}
   input[type=text],input:not([type]){width:100%;max-width:320px}
   button{background:var(--acc);color:#1a0e08;border:0;border-radius:6px;padding:10px 16px;font-weight:700;cursor:pointer}
   button:disabled{opacity:.45;cursor:not-allowed}
@@ -84,6 +88,13 @@
             <option value="qwen3">Qwen3 14B (local)</option>
             <option value="claude_sonnet">Claude Sonnet 4.6 (claude-sonnet-4-6)</option>
             <option value="claude_haiku">Claude Haiku 4.5 (claude-haiku-4-5-20251001)</option>
+            <option value="codex">ChatGPT/Codex 5.6 Terra (gpt-5.6-terra)</option>
+            <option value="codex_gpt56_sol">ChatGPT/Codex 5.6 Sol (gpt-5.6-sol)</option>
+            <option value="codex_gpt56_luna">ChatGPT/Codex 5.6 Luna (gpt-5.6-luna)</option>
+            <option value="codex_gpt55">ChatGPT/Codex 5.5 (gpt-5.5)</option>
+            <option value="codex_gpt54">ChatGPT/Codex 5.4 (gpt-5.4)</option>
+            <option value="codex_gpt54_mini">ChatGPT/Codex 5.4 Mini (gpt-5.4-mini)</option>
+            <option value="codex_spark">ChatGPT/Codex Spark (gpt-5.3-codex-spark)</option>
             <option value="glm">GLM (local)</option>
           </select>
         </div>
@@ -94,6 +105,7 @@
     <div class="dim" style="margin-top:8px;font-size:12px">
       <b>Analyze</b> runs each source separately. <b>Merge + Analyze</b> combines selected corpora into one run and one report.
     </div>
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -113,6 +125,7 @@
       </thead>
       <tbody id="rows"></tbody>
     </table>
+    </div>
   </div>
 
   <div class="card" id="kickoffCard" style="display:none">

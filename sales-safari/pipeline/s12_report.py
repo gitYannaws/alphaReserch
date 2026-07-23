@@ -123,7 +123,7 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None,
         if progress:
             progress(done, total)
 
-    lines.extend(["## Ideas And Kill Tests", ""])
+    lines.extend(["## Ideas", ""])
     if not ideas:
         lines.extend([
             "No ideas were generated because there were no non-dropped ranked themes.",
@@ -136,11 +136,6 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None,
             idea["pitch"],
             "",
             f"- Evidence: {idea['evidence_permalink']}",
-            f"- Kill test: {idea.get('kill_test') or ''}",
-            f"- Metric: {idea.get('metric') or ''}",
-            f"- Threshold: {idea.get('threshold') or ''}",
-            f"- Timeframe: {idea.get('timeframe') or ''}",
-            f"- Channel: {idea.get('channel') or ''}",
         ])
         lines.extend(_comp_lines(idea.get("cluster_id")))
         lines.append("")

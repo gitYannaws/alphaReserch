@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gold set labelling — sales-safari stage 3</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --fg:#16191d; --muted:#666e79; --card:#fff; --line:#dfe3e8;
+    --pain:#c2410c; --painbg:#fff2ec; --clean:#15803d; --cleanbg:#effaf1;
+    --accent:#1d4ed8; --sel:#ffe08a; --shadow:0 1px 3px rgba(0,0,0,.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#15171a; --fg:#e6e9ee; --muted:#98a1ad; --card:#1d2025; --line:#2e333a;
+      --pain:#fb923c; --painbg:#2c1a10; --clean:#4ade80; --cleanbg:#0f2417;
+      --accent:#7ba3ff; --sel:#7a5c00; --shadow:none;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif; }
+  header { position:sticky; top:0; z-index:5; background:var(--card); border-bottom:1px solid var(--line);
+           padding:10px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; box-shadow:var(--shadow); }
+  h1 { font-size:14px; margin:0; font-weight:650; letter-spacing:.2px; }
+  .grow { flex:1; }
+  button { font:inherit; padding:6px 12px; border-radius:7px; border:1px solid var(--line);
+           background:var(--card); color:var(--fg); cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button.pain { background:var(--painbg); border-color:var(--pain); color:var(--pain); font-weight:600; }
+  button.clean { background:var(--cleanbg); border-color:var(--clean); color:var(--clean); font-weight:600; }
+  .bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; width:170px; }
+  .bar > div { height:100%; background:var(--accent); transition:width .15s; }
+  main { max-width:820px; margin:20px auto 120px; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:11px; padding:18px; box-shadow:var(--shadow); }
+  .title { font-weight:650; margin-bottom:4px; }
+  .meta { color:var(--muted); font-size:12px; margin-bottom:14px; font-variant-numeric:tabular-nums; }
+  /* pre-wrap is REQUIRED: it makes the rendered text byte-identical to doc.text, so a
+     mouse selection maps to an exact substring. Without it the browser collapses runs of
+     whitespace and every selected span fails the exact-substring gate. */
+  #text { white-space:pre-wrap; word-wrap:break-word; background:var(--bg); border:1px solid var(--line);
+          border-radius:8px; padding:14px; max-height:44vh; overflow:auto; user-select:text; }
+  #text::selection, #text *::selection { background:var(--sel); }
+  .spans { margin-top:14px; display:flex; flex-direction:column; gap:7px; }
+  .span { display:flex; gap:9px; align-items:flex-start; background:var(--painbg); border:1px solid var(--pain);
+          border-radius:7px; padding:8px 10px; font-size:13px; }
+  .span code { flex:1; font:12px/1.5 ui-monospace,Consolas,monospace; color:var(--fg); word-break:break-word; }
+  .x { border:0; background:transparent; color:var(--pain); cursor:pointer; padding:0 4px; font-size:16px; line-height:1; }
+  .verdict { margin-top:16px; display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
+  .hint { color:var(--muted); font-size:12px; }
+  .err { color:var(--pain); font-size:12px; min-height:16px; margin-top:7px; }
+  kbd { background:var(--bg); border:1px solid var(--line); border-bottom-width:2px; border-radius:4px;
+        padding:1px 5px; font:11px ui-monospace,Consolas,monospace; }
+  .done { text-align:center; padding:40px 20px; }
+  .guide { background:var(--card); border:1px solid var(--line); border-radius:11px; padding:16px 18px; margin-bottom:16px; }
+  .guide ul { margin:8px 0 0; padding-left:20px; }
+  .guide li { margin:3px 0; }
+  .egs { margin-top:14px; display:flex; flex-direction:column; gap:8px; }
+  .eg { border:1px solid var(--line); border-left-width:3px; border-radius:7px; padding:9px 11px; font-size:13px; }
+  .eg.y { border-left-color:var(--pain); background:var(--painbg); }
+  .eg.n { border-left-color:var(--clean); background:var(--cleanbg); }
+  .eg q { display:block; font-style:italic; margin-bottom:4px; }
+  .eg q u { text-decoration:none; background:var(--sel); border-radius:2px; padding:0 2px; }
+  .eg b.y { color:var(--pain); }
+  .eg b.n { color:var(--clean); }
+  .eg span { color:var(--muted); }
+  .pill { font-size:11px; padding:2px 7px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .pill.yes { border-color:var(--pain); color:var(--pain); }
+  .pill.no { border-color:var(--clean); color:var(--clean); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Gold set — stage 3</h1>
+  <span class="pill" id="pos">no sample</span>
+  <div class="bar"><div id="prog" style="width:0"></div></div>
+  <span class="pill" id="tally"></span>
+  <span class="grow"></span>
+  <button id="guidebtn">? Guide</button>
+  <button id="load">Load sample…</button>
+  <button id="back">← <kbd>←</kbd></button>
+  <button id="fwd"><kbd>→</kbd> →</button>
+  <button id="export" class="primary" disabled>Export labels</button>
+  <input type="file" id="file" accept=".json" hidden>
+</header>
+
+<main>
+  <div class="guide" id="guide">
+    <b id="guide-lead">Load <code>db/gold-sample.json</code> to begin.</b>
+    <ul>
+      <li><b>Has pain</b> = the author states their <i>own</i> complaint, workflow friction, costly workaround, or explicit wish.</li>
+      <li><b>No pain</b> = answers, advice to others, thanks, praise, debate, chit-chat.</li>
+      <li>If it has pain: highlight the exact evidence text, then press <kbd>y</kbd> — that records the span and moves on.</li>
+      <li>More than one distinct pain in a post? Highlight each and press <kbd>s</kbd> to stack them, then <kbd>y</kbd> when done.</li>
+      <li>Judge only what the post says. You are the ground truth — this is deliberately blind to what any model found.</li>
+    </ul>
+    <!-- Illustrative only — invented, not drawn from the sample, so they cannot anchor a
+         real judgement. They encode the same rules stage 3's prompt is given, because the
+         extractor is scored against exactly this standard. -->
+    <div class="egs">
+      <div class="eg y"><q><u>Every export I have to retype the same address by hand.</u> Costs me 20 minutes a week.</q>
+        <b class="y">Has pain</b> <span>— own friction, stated as theirs. Highlight just the complaint.</span></div>
+      <div class="eg y"><q><u>I wish there was a way to filter these by date.</u></q>
+        <b class="y">Has pain</b> <span>— an explicit wish counts on its own.</span></div>
+      <div class="eg n"><q>You should try the bulk import tool, it works great.</q>
+        <b class="n">No pain</b> <span>— advice to someone else; the author states no problem of their own.</span></div>
+      <div class="eg n"><q>Thanks, that fixed it!</q>
+        <b class="n">No pain</b> <span>— chit-chat.</span></div>
+      <div class="eg y"><q>Just use the CSV workaround like I do — <u>I gave up waiting for them to fix the API.</u></q>
+        <b class="y">Has pain</b> <span>— advice, but the author also states their own grievance. That clause is the pain, not the advice.</span></div>
+    </div>
+  </div>
+  <div id="app" hidden>
+    <div class="card">
+      <div class="title" id="title"></div>
+      <div class="meta" id="meta"></div>
+      <div id="text"></div>
+      <div class="err" id="err"></div>
+      <div class="spans" id="spans"></div>
+      <div class="verdict">
+        <button class="pain" id="yes">Has pain <kbd>y</kbd></button>
+        <button class="clean" id="no">No pain <kbd>n</kbd></button>
+        <button id="addspan">Add selection as span <kbd>s</kbd></button>
+        <span class="hint" id="state"></span>
+      </div>
+    </div>
+  </div>
+  <div class="done card" id="done" hidden>
+    <h2>All
+      <span id="dn"></span> labelled.</h2>
+    <p class="hint">Export, then score with:<br><code>.venv/Scripts/python bench/score_gold.py qwen2.5</code></p>
+    <button class="primary" onclick="doExport()">Export labels</button>
+  </div>
+</main>
+
+<script>
+// build_gold_sample.py --emit-html rewrites this line to inline the sample, so the page
+// opens ready to label with no file picker and no fetch (fetch would fail under file://).
+// Left null here, this file still works standalone via "Load sample…".
+const INLINE_SAMPLE = {"seed": 20260716, "created_at": "2026-07-16T17:06:41", "population": 47823, "population_desc": "extracted docs (run reached stage 3+) under 500 chars", "max_len": 500, "scope_warning": "Scores from this sample are recall on docs under 500 chars, NOT overall recall. Docs >= 500 chars are ~11.5% of extracted docs but hold ~31% of pain-docs, and are excluded here. Do not quote these numbers as whole-corpus.", "per_bucket": 40, "strata": [{"bucket": "\u003c100", "population": 22314, "population_share": 0.466596, "sampled": 40, "weight": 1.399787}, {"bucket": "100-199", "population": 13133, "population_share": 0.274617, "sampled": 40, "weight": 0.82385}, {"bucket": "200-499", "population": 12376, "population_share": 0.258788, "sampled": 40, "weight": 0.776363}], "docs": [{"id": "e0e92b46fddd5f64", "bucket": "200-499", "title": "One of the many reasons Passport Bros go overseas to date instead.They don’t know if there western dates are actually interested in getting to know them or using them as a form of financial ATM. Why have you decided to get a passport?", "text": "He thinks he’s going to go to Asia, South America, Europe, or Africa and tell a woman to go half on dinner and think she’s going to get ready, put on makeup for 40 minutes, then get in her car and go see him lol He’s delusional"}, {"id": "c8837a58e287c4d5", "bucket": "200-499", "title": "Smokey Hill Design 1/8 Maple Settings", "text": "Try using the settings GF has for their 1/8 maple. Do a test cut with a rectangle or a circle shape… Everyone’s settings for non-PROOFGRADE materials will be different. Glowforge users have to learn to LOVE experimenting with non_PROOFGRADE materials. Digital calipers are an absolute must. Yesterday I spent 3 LONG HOURS – trying to get the correct settings for new material."}, {"id": "81ad085f9e5cba68", "bucket": "100-199", "title": "Swedish Woman Says There Is \"1 Guys For Every 10 Woman\" In Sweden. Also Says Swedish Men Don't Know How To Talk To Women - Should Passport Bros Touchdown In Sweden in 2026?", "text": "Sweden's expensive. But...you can presumably find every flavour of woman there...same goes for New York or Toronto."}, {"id": "0aacf577dec0d305", "bucket": "\u003c100", "title": "The truth about the passport bro community", "text": "im getting my 🍿 for the comments... hard truths on that video"}, {"id": "f942eeab16068530", "bucket": "\u003c100", "title": "Thoughts on this passport bro map?", "text": "these maps are pointless and offers no real world advice for passport bros"}, {"id": "eced7d964b3aaab5", "bucket": "\u003c100", "title": "What's Israel like as a PPB destination?", "text": "It's called pinkwashing. https://en.wikipedia.org/wiki/Pinkwashing_(LGBTQ)"}, {"id": "4022451e96841a9b", "bucket": "100-199", "title": "Are older foreigners becoming increasingly invisible in the dating pool in Thailand?", "text": "Yeah this is such cope. Thailand used to be a haven for geriatric old men, but now with how bad dating is in the West, Gen z men are migrating en masse to passport bro havens"}, {"id": "89aac847324ee68e", "bucket": "\u003c100", "title": "Best places to go as a shorter Latino man", "text": "Tell me your secrets"}, {"id": "67bf5ef1e76af587", "bucket": "200-499", "title": "I was a passport bro in 2005", "text": "disagree with you. I'm East Asian guy. Not tall. I agree in the aspect that effort and having game and being well groom HELPS. but end of the day I would have to approach and jump through more hoops. I notice the taller better looking guys can put in less effort but get better results. It's only if they are totally socially retard that they get no play."}, {"id": "a3a706044b4cc12c", "bucket": "\u003c100", "title": "My passport bro experience over the years", "text": "Nah, props to you for putting in the work. Mad respect."}, {"id": "868c13032dc722f8", "bucket": "100-199", "title": "The situation in India gets worse day by day", "text": "There are a group of women in Latin america that are also feminist and empowered, but the majority keep their culture."}, {"id": "29913b55907488be", "bucket": "100-199", "title": "Singapore and Taiwan", "text": ">not getting anywhere What does this mean? Are you actively out trying to make friends through common interests? Dating apps?"}, {"id": "1cd3d2b838e4ad0a", "bucket": "200-499", "title": "What type of stone can be engraved?", "text": "Being opague and not reflective to CO2 laser wavelengths is the main factor. Having a glass temperature in the right range, and not being overly thermally conductive (to allow it to reach high temperatures) are the secondary concerns. My geology is not sufficient to make sweeping statements. But non-conductive rocks likely will all show at least a little bit of marking from laser being applied."}, {"id": "f4dc489bc25a7b22", "bucket": "200-499", "title": "Thailand or Morocco or Brazil or Philippines", "text": "Noticed a lot of people saying Brazil. They’re right. Only caveat is; learning the language is what will allow you to maximize your time/ opportunities in Brazil. Get down 50 common words or phrases and you’re in there."}, {"id": "bf6a2bd23335a987", "bucket": "\u003c100", "title": "Tell me about your Meetup App experiences (solo travel)", "text": "Mundo Lingo language exchange - they host events."}, {"id": "904dc1a48146cae2", "bucket": "\u003c100", "title": "Is China that easy for American men?", "text": "The Chinese government"}, {"id": "41ec3ea3fc4822dd", "bucket": "\u003c100", "title": "I’m an American woman…", "text": "Not true, I make lower 6 figures, am 6'2\", and have a 7\" Penis. Not everyone has 8\". 😉🤣"}, {"id": "f38a7e4d98f01577", "bucket": "100-199", "title": "Becoming the talk of the town as soon as you arrive?", "text": "Dude stop worrying about what people think of you. Just travel and enjoy yourself, stop looking at the world through other's eyes"}, {"id": "a09f832fe5f8daf4", "bucket": "200-499", "title": "How do you single men in your 30s \"put yourself out there\" without using apps or cold approaching randoms?", "text": "Bro, put your phone down. I am not talking about meetups on apps. Search for 'language meetups in [city you want to goto]' in google, you will find ig's, meetup dot com groups, and also search in facebook groups. Are there any dance class apps you are going to refer to next?"}, {"id": "a70d648bb8eebfdf", "bucket": "200-499", "title": "Can someone help me understand heavily tattooed SE Asian women?", "text": "Tattoos generally means working in sex trade in Thailand. Some might think it's Thai culture. But look at these photos of Thai music girl groups. Notice no tattoos. Click Thailand's arguably most famous celebrity is Lisa of Blackpink. Zero tattoos."}, {"id": "b6f3682cdcb8657b", "bucket": "\u003c100", "title": "Barely any likes on Tinder in Bamgkok. Wtf am i doing wrong or have women became like in the west here?", "text": "Probably get butt hurt and delete your profile too much."}, {"id": "fbd5efa47624fb0b", "bucket": "200-499", "title": "Western Woman in Panic and Anxiety Witnessing Grandpa Passport Bros Date Younger Filipinas 🤔", "text": "Did she have a gun to her head forcing her to marrying the man? If she genuinely didn’t want to marry the man she could have said no, it’s that simple. She is the one that decided to be with an older man. So don’t blame the man, blame the woman. Are you really blaming the man that a younger woman said yes to dating him? It’s like you’re implying women can’t make choices for themselves or lack accountability"}, {"id": "7e2b9d3ccec080f4", "bucket": "200-499", "title": "Can't Afford to Bring a Wife Back", "text": "My wife was born and raised in Indonesia. I think we've spent over half of our marriage in the US now. The other day she was saying the girls didn't have to become doctors or go that far in education because they needed to get married, raise children, etc. I didn't point out that this kind of talk makes feminists upset. America hasn't turned her into a stark raving feminist."}, {"id": "04ec2bbc6aca0eec", "bucket": "\u003c100", "title": "I am not really into travelling all the way to Africa from the US. Where in the African diaspora is good place to visit that comes closest?", "text": "I heard Houston has a large African community, I haven't been there though."}, {"id": "a8b53ca6fb39a4cf", "bucket": "200-499", "title": "Filipina fires shots at western women", "text": "I follow just to laugh at the absurdity of it. To me these men just take advantage of women from poverty stricken countries and don’t realize that’s why the woman is even with them to begin with. Many have not realized that they are the problem…not western women."}, {"id": "7968f415deeabf0b", "bucket": "200-499", "title": "If there's no money involved,What do you think are the qualities of PPB that stands out than locals?", "text": "Yeah, my mistake was just writing while drinking coffee. But you're completely right. You need looks on your side in Eastern Europe, more than in SEA, or you need to come there with a very fat wallet but preferably both. If the wallet is fat enough with enough for a luxury life for a decade or two, it's possible. In SEA you need just enough to live a normal life."}, {"id": "52d6fd8ea8a93931", "bucket": "100-199", "title": "Interesting thing to think about", "text": "The difference here is that foreign women don't complain and bitch about every little thing. They're not entitled like these bitches in West. They actually do house chore and help you out."}, {"id": "8906f1bc5c3c0aed", "bucket": "\u003c100", "title": "Tinder in Thailand", "text": "I know, me neither pal, what do you think this group is created for?"}, {"id": "18af5ae7a07d66b1", "bucket": "200-499", "title": "Anyone has experience in South Korea?", "text": "Your old posts are training data now. Unless you delete them. I used Redact which supports all major social media platforms including Reddit, X, Facebook and Instagram. meeting lavish many beneficial rinse attempt divide spoon deserve rob"}, {"id": "b5c95f7d73a271ef", "bucket": "100-199", "title": "Why do so many PPBs lie that Thai Women or Philipino Women can hold theyre own looks wise against europeans or latinas?", "text": "I mean you can find girls every bit as hot in South Brazil and maybe even Argentina and they’ll have way better attitudes than Russian women lolz, well at least the Brazilians will"}, {"id": "7e934627e965d4a7", "bucket": "\u003c100", "title": "My Life In the Philippines - Benefits Beyond Just Dating", "text": "Lots of cockroaches."}, {"id": "16c136e546649e80", "bucket": "100-199", "title": "How are you organizing your peptides?", "text": "I like these cheap soft cases I get from amazon. And I label them with a nimbot heat transfer printer."}, {"id": "6eda1dc4a9e8eab8", "bucket": "\u003c100", "title": "I’m a woman, where are the best countries for traditional men?", "text": "You do not have to, but it is incredibly difficult otherwise. Good luck 👍"}, {"id": "3ded3b6b978c4b27", "bucket": "100-199", "title": "Do Western women think that if they look good, they can be bitches?", "text": "Nothing like advice from someone who catastrophically failed at the thing they're telling you about..."}, {"id": "7dbd2eedb7bb74ec", "bucket": "200-499", "title": "We need to ban Colombia my brothers. It is very dangerous place and we should not condone our fellow passport Bros to go there.", "text": "I went to Cartagena alone twice. I'm going to Medellin in March. It's unfortunate that guy got dealt a bad hand. I heard that these women on these dating apps be setting men up. That's why I don't mess with dating apps out the country no more. Also Colombian women can be flaky when it comes to setting up dates. Quick to ghost anyway. I don't mess with no drugs and I'm not a heavy drinker. I never leave any drinks I have unattended, not even water."}, {"id": "261e41ddce7a52ba", "bucket": "100-199", "title": "First time going to Philippines to see Pinoy GF", "text": "Manilla in August is brutal.. so be prepared. I dont know how long you are going to stay with her in Manilla, but its hard to get rid of her if things are not working out between you and her."}, {"id": "e283d275a415fe5c", "bucket": "100-199", "title": "Is this still accurate this year 2026 or nah?", "text": "They don’t have to help you to manage your chronic conditions in the ER. They’re only required (for men) to save your life or limb."}, {"id": "759928069a0e8fa1", "bucket": "\u003c100", "title": "Mexico City", "text": "What does your bio say?"}, {"id": "2fd9fdd79556835f", "bucket": "200-499", "title": "Christian Latinas Won’t Dance", "text": "Catholics have a long history of killing Protestant christians and Christians in general that didn't bow to their ruler and theology. Why do you think a lot of them escaped England to come to America? Catholicism is not Christianity"}, {"id": "21e4dd100316de8a", "bucket": "\u003c100", "title": "Avoid beach areas", "text": "Try bringing a mini pig, chick magnet..."}, {"id": "1d969add25d7f0c7", "bucket": "200-499", "title": "Same guy — 5'10\", $50k/yr — is \"top 33%\" in the US, \"top 10%\" in Colombia, and \"top 5%\" in Thailand", "text": "I am a stats guy. Can you post your methodology / calculations / data sources on the website? Having a few knowledgeable people review your implementation can help identify errors and improve your product. \"Trust me, bro\" will only get you so far."}, {"id": "023b27b35fefc4e2", "bucket": "100-199", "title": "Why you should move to Colombia", "text": "Articulate please. It's Friday and I'm 3 martinis down.... brain capacity and attention span is sub optimal. Really, would love to hear your thoughts....."}, {"id": "1b2d520be3146ae6", "bucket": "100-199", "title": "Top 5 Travel Recommendations 2026", "text": "This you? https://www.reddit.com/r/eu4/comments/1pfwzpe/is_it_rare_to_get_colonialism_in_london/ No way you pulled good in Seoul posting on the EU4 subreddit LMBO"}, {"id": "84e4a6a2520a4109", "bucket": "100-199", "title": "Russian women are extremely difficult", "text": "I feel like white women everywhere have become impossible today. Just never happy. Always working against you."}, {"id": "cf84970487dfa840", "bucket": "\u003c100", "title": "What's up with Brazilian women?!", "text": "What happened no chemisty?"}, {"id": "3652207969d4c4a6", "bucket": "100-199", "title": "Taiwanese women prefer Asians over Western guys while Japanese women have rooms for Americans", "text": "Probably Brad Pitt or Leonardo DiCaprio in their primes like 30 years ago is what they have in their heads."}, {"id": "ad43bbc3433755ee", "bucket": "200-499", "title": "A Brazilian's Experience Talking to Two Western Women", "text": "Si buscas mujeres en países asi es de esperarse que te topes con eso, el feminismo tóxico ha dañado la feminidad de las chicas en occidente, si vas a países un poco más conservadores sin tanta exposición a esas agendas, de valores tradicionales como las latinas, encontraras chicas más femeninas ."}, {"id": "963047afb2062584", "bucket": "\u003c100", "title": "Is she right???", "text": "Absolutely correct. It's the internet. Poor people just have access to the internet now."}, {"id": "75680a6175845f1e", "bucket": "200-499", "title": "Passport Bro with his Indian wife a day after their wedding!", "text": "there are cities and areaa in india which were designed and architected by britishers like shimla they tend to look modern. in bangalore there are many wedding venues and areas which looks modern like the ones on tv. but it's common in indian women - foreign men marriage, to travel to both their in laws places and spent time with them after marriage ceremony"}, {"id": "6ed240e703e5e74d", "bucket": "\u003c100", "title": "Best country to get a wife and how", "text": "What country should i go to to meet my wife"}, {"id": "2031775cc81cb6c7", "bucket": "200-499", "title": "Should I go for it?", "text": "I would tell you the most important thing about becoming a passport bro is not to get sucked into the scams and also be careful of how much you spend on women. No matter how much you make you can always overspend. It takes discipline to not get sucked in. If you have discipline, you can make it out of any situation. Don’t be like this guy. \u003cimage>"}, {"id": "33cf5fd2f95d7ae5", "bucket": "100-199", "title": "Manila 2026. What's I do wrong, need advice. Plus feedback", "text": "DM me. You a cool guy, thank you for translation in very close. I mean something about orgasm and what happens next - not simulant. You English is awesome"}, {"id": "93d9c9e3fc64c2df", "bucket": "100-199", "title": "Norway is becoming a passport bro hub with their new foreign labor laws to increase more foreign workers in the country", "text": "Its awful here😂 the requirements women set for men is is absolutely out of control. No better the the us so stay away if you want a women w values"}, {"id": "dcf5097212751d1b", "bucket": "\u003c100", "title": "Racism and PPB Advice", "text": "Sorry brother I'm shooting on sight, I'm on my bs mission of the day 😂"}, {"id": "20774fd60fa945a7", "bucket": "100-199", "title": "are we delusional?", "text": "ChineseHistorian is misleading people. WMAF has a lower divorce rate than WMWF. AMWF has a higher divorce rate than WMWF."}, {"id": "a5434f6c115d5f6b", "bucket": "100-199", "title": "Searching for a guy", "text": "If they have that many options, then why are there so many men who complain to be always alone and don't find anyone?"}, {"id": "52aaf75463b61ffa", "bucket": "200-499", "title": "The Dark Side of Moving to the Philippines Nobody Talks About", "text": "After living in Thailand for 12 years I recently went to the Philippines to visit 2 retired friends there and honestly couldn’t wait to get back to Thailand. Yes, people speak English there. I couldn’t really come up with a lot of other pluses or advantages over Thailand."}, {"id": "2c8d40c14c51b8fa", "bucket": "100-199", "title": "Is there something wrong with me?", "text": "You'd be surprised what money can do. Money opens the door, you meet women, build confidence, meet more women. Btw, if you're such a Chad, what are you doing on ppb? Clown 🤡"}, {"id": "673b9a539ef8acbc", "bucket": "100-199", "title": "Philippines is INSANE, I have no words for it", "text": "Spent 4 weeks in Da Nang and 4 weeks in Hoi An and I don't remember seeing a single baddie, not one."}, {"id": "867fd6c3687c655d", "bucket": "\u003c100", "title": "Thoughts on this passport bro map?", "text": "It's easy to love Djibouti..."}, {"id": "4b68250fe976beee", "bucket": "100-199", "title": "Looking for location suggestions - Solo male travel", "text": "Thailand is the best place if you just want to just bang women. Personally I find the women (on average) to be extremely physically ugly but to each his own. If you're paying then go there."}, {"id": "ec14d41d57ae99fb", "bucket": "100-199", "title": "Would you agree western guys wants families more than the females nowadays (compared to 70s - 80s) ???", "text": "Oh for sure. She was always complaining about financial instability and how bio dad never helps nor her family lolol"}, {"id": "cc41be46f4bad0be", "bucket": "200-499", "title": "Cold approaches in Latin America", "text": "Yes, cold approach works. I coached a client who was able to get 25 lays in a year exclusively from cold approach in Colombia. It is hard though. Latin America isn't the super easy cheat code guys think it is. You'll get marginally more interest from girls and SOME of them will put up less barriers when hooking up, but you'll still have to deal with 95% of the same issues you deal with in America."}, {"id": "05cdbd2db77d1c44", "bucket": "200-499", "title": "Medellin hostel or airbnb?", "text": "I found some very nice looking airbnbs and was quite tempted but the suite in Los Patios isn't too bad either. Its the same price as the airbnbs but with the added benefit of being able to mingle with other tourists. Still some time left before I go tbh, but the tickets/hotels have all been booked now. I am deffo looking forward to it!"}, {"id": "175f115b4e7733f1", "bucket": "200-499", "title": "New passport bro", "text": "I am confused, I said I wouldn’t date an African girl that is outside of her culture. Meaning, I am not going to date a blonde hair wig African or one that tries to mimic indecency of Western culture. What country are you from?"}, {"id": "8216f996ae8d0af6", "bucket": "100-199", "title": "What’s it like marrying a Latina?", "text": "And how mom treats dad. If you go to dinner and mom is nonstop yelling and bad mouthing the dad FAFO what happens after your honeymoon period is over"}, {"id": "b7c7454598ee11ce", "bucket": "\u003c100", "title": "Anyone has experience in South Korea?", "text": "you're either not white or not goodlooking"}, {"id": "a253ffa4fad132aa", "bucket": "200-499", "title": "The stares when dating a local girl", "text": "Sokka-Haiku by Serious_Fly_4929: I get the same stars When I go to Africa, So you are not alone Remember that one time Sokka accidentally used an extra syllable in that Haiku Battle in Ba Sing Se? That was a Sokka Haiku and you just made one."}, {"id": "1e030eb284814b12", "bucket": "100-199", "title": "Dating Apps", "text": "Are you looking for fun or real relationship? If the latter, you should have done it months in advance so you could weed out all the scammers and golddiggers. Fun can be obtained any time."}, {"id": "69ac421eafceda89", "bucket": "100-199", "title": "How much of a difference does it make if you learn their language?", "text": "Huge fucking difference. I would not attempt what you guys attempt without knowing the language, in my case Spanish. Totally worth the investment."}, {"id": "d2407f8f9ae47478", "bucket": "100-199", "title": "here we goooooo", "text": "I'm someone who had little problems getting numbers and dates in USA, but Tinder was just awful. It's not even always a good reflection of reality."}, {"id": "7e9d55102e4fd6cd", "bucket": "\u003c100", "title": "I Moved to Russia-~2 years so far", "text": "Here’s to hoping you get conscripted🤭 so you can enjoy the full experience."}, {"id": "f8fda353420636f7", "bucket": "\u003c100", "title": "At what point did you realize American women aren’t it?", "text": "No they're just better at getting away with the lies"}, {"id": "c0f5ebd1e4f5efbb", "bucket": "200-499", "title": "I am looking for a hubby", "text": "I'm not sure how many you will find with that list. If you are pretty you would probably get further if you posted a picture, but then guys may not read the list. Can you make lebanese bread, mahshi, or other middle eastern foods? Just french fries, pizza and frying eggs.... most of us guys can fry eggs. That's kind of like a man advertising that he can screw in a light bulb as a mechanical skill. If a man is Muslim and dating, what constitutes cheating? A fifth girlfriend?"}, {"id": "981c62bd2e5f92e2", "bucket": "\u003c100", "title": "What was the last straw of you ?", "text": "What oldest profession?… Selling yourself?… Yeh, prostitution."}, {"id": "f214ffb6d8900672", "bucket": "\u003c100", "title": "What do you think about Passport Bros? (A bunch of ignorance in this thread)", "text": "A lion does not care what the gazelles think."}, {"id": "9d44dc7b6ba09242", "bucket": "\u003c100", "title": "My brother said: A demonic hamster told you to move to the Dominican Republic", "text": "I was certain you were going to say outside SD."}, {"id": "2e8bc11c874caaf5", "bucket": "\u003c100", "title": "Black man observations of Toyko Japan", "text": "If you cant understand it yourself than nothing i say is gonna change your mind."}, {"id": "21fbeb329de1de73", "bucket": "\u003c100", "title": "Medellin Guys Trip in 10 days with my guys. Ideas please.", "text": "Please share your experience later! I'm going in April."}, {"id": "8383a1f1e7bc0d05", "bucket": "200-499", "title": "Thoughts on the guy that after moving to the Philippines to marry his wife he was hurt?", "text": "Yes it's a dealbreaker. The point of Passport bros is to have more options, not just who to date but where to date, and not settle for risky relationships This guy had the option to date and settle down in a safer location but he didn't. Sad what happened to him but this could have been avoided"}, {"id": "f8f4ebcd3354f1a3", "bucket": "200-499", "title": "Are Guys in Philippines Just Coping?", "text": "The part about dark skin isn't even remotely true. Its something made up by racist. I know because ive been deeply entrenched in Filipino behavior and culture for well over a decade now. They DO see ivory skin as a sign of beauty, but they dont see brown as \"unattractive \"."}, {"id": "e098671634be5dec", "bucket": "200-499", "title": "Looks matter", "text": "so you're telling me with a straight face that looks don't matter to women despite your claim that, coming from the wealthiest countries in the world, where women want men for their resources, they still do not want western men, who hold all the resources, and thus western men are fleeing western women? What? this is way more confusing for me to read than it must be for you"}, {"id": "7f9df1c7c0f35d63", "bucket": "\u003c100", "title": "Passport bros opposite", "text": "With the advantage that tourists usually leave in 20 days 😄"}, {"id": "b5fa3ad0f727937f", "bucket": "200-499", "title": "Task Failed Successfully", "text": "I would just say be careful. You may have known each other in person for a while, but it’s still long distance for now, which comes with fidelity risks, and “meeting at the airport” is one of the things the older expats say to try to avoid, so that you have some freedom to shop around when you get back to SE Asia for the right match and don’t get locked down too early. Either way, best of luck!"}, {"id": "8f9f178f4b5007bd", "bucket": "200-499", "title": "East Asian Dude passport bro guide", "text": "this also applies to black men more than any other ethnic group. USA is racist with the black man being placed at the lowest level of society. As an asian man in USA you are higher up. USA is just very racist if your a white man you are the one to be desired if not other countries really are better."}, {"id": "f0e680ec7c7527ca", "bucket": "200-499", "title": "Men… why do you fly to LATAM and then complain about provide to a woman? Don’t you know that latinas we are built different than Europe? Latinas want providers think about that before you come to Mexico, Colombia, Brazil etc", "text": "Your account age does not meet our requirements to post here. I am a bot, and this action was performed automatically. Please contact the moderators of this subreddit if you have any questions or concerns."}, {"id": "2c9f5a7ef05f5e8c", "bucket": "200-499", "title": "1 Year of travelling as a PassportBro - INSANE Experiences!", "text": "Kenya 100 fold. But it depends on if you are white and age Id say. And also if you are into black women. Nairobi is great because its one of the few African cities that are actually developped and have good services overall. Unlike cities in Uganda or so"}, {"id": "571c3ca9720eae50", "bucket": "200-499", "title": "If you’re a shy loser in America, you’re a shy loser everywhere.", "text": "You will. And not magically but logically. If you are 6ft, have light eyes, white skin, you will be handsome by SEA standards. My asian girl showed me some guys and told me they are handsome, and in the West they would be like \"nice, but nothing special\". So another fail theory."}, {"id": "bf4a7e6e7e73d2ad", "bucket": "100-199", "title": "Average passport bro experience", "text": "He said by to the girl, then asked us if he should accept their offer, but the girl is still with him when he grabs a cab. 🤔"}, {"id": "8b71fe92fc229bdf", "bucket": "\u003c100", "title": "Why Do Some People Assume That Most Passport Bros Are MAGA?", "text": "60% of white women are liberal. The 40%Republican women are all married."}, {"id": "efac91fb754b8340", "bucket": "\u003c100", "title": "What European cultures are doing well with marriage?", "text": "Catholic countries like Poland should be better, at least in theory"}, {"id": "4580e43a1f3ec6b1", "bucket": "200-499", "title": "Do you need to use dating apps if you go to thailand?", "text": "Sure you can talk with them but cold approach has a very low success rate. Most normal girls in public are already in relationships or don't want to be approached. Unless you have some type of mutual connection the only real way to get sex/relationships is through dating apps."}, {"id": "00bf429b56e09288", "bucket": "200-499", "title": "Is this the easiest place in the world to date women?", "text": "From 20-40. I have no problem being with girls who are older than me as long as they’re attractive. But I would say I mostly attract girls in their 20’s because that’s the age group I mostly look for. But sometimes it’s good with some variation and a more mature woman who has more experience."}, {"id": "98a314096cd17f59", "bucket": "100-199", "title": "Experienced travelers, where overseas did you get laid the most and where you didn't? (no pay for play)", "text": "Absolutely the same for me in all those places except Mexico…never been. Sweden was a random older lady."}, {"id": "53c283706e6320e5", "bucket": "100-199", "title": "This is huge for PBs if they bring a woman back to the U.S...", "text": "Inherent in the fear of being “used” is the inability to tell the difference between someone who is using you for second order effects and someone who genuinely likes you. I find that sad"}, {"id": "d499d63df60ab3fe", "bucket": "200-499", "title": "Which one limits men more when it comes to dating women: height or race?", "text": "Race every time. People don't care that much about height in real life, but race is a roadblock of varying degrees in every culture. If race is not a roadblock for the woman, it likely will be for her extended family who may secretly hate you. Life is rough, man."}, {"id": "6973309a526a0dfe", "bucket": "\u003c100", "title": "What are the stats of the avg ppb?", "text": "I should have just read your name haha. Thank you"}, {"id": "275dbe882d54e187", "bucket": "200-499", "title": "Not registering entire material image", "text": "Thank you, I am new to the world of engraving and I set the speed/power to what the company I purchased the wood from recommended. I will change the speed and see what happens. Thank your quick assistance."}, {"id": "add4c6f277c7b1e0", "bucket": "100-199", "title": "Women outside the West treat being flirted with as a common occurrence—it doesn't boost their egos.", "text": "I would say in countries like America, some men aren't with men who are expressive with how they feel with someone so if you're that type of person it give you an edge."}, {"id": "36ac0fd2764a04d9", "bucket": "100-199", "title": "Kids and Citizenship", "text": "For those of you who married a foreign woman and had kids with her - do the kids have your citizenship, the wife’s citizenship or both?"}, {"id": "c6864be283c81064", "bucket": "100-199", "title": "Warning: Stay Away from Singapore", "text": "Clearly this man has become a master of online dating to the point he can't turn off the Tinder manipulations"}, {"id": "e8e633aac1a5a97d", "bucket": "100-199", "title": "In Morocco and Brazil. Both occasions i was unemployed #AMA", "text": "Yes, because the men causing trouble are in Spain. In their home country, they'd end up in jail or worse. PS. I'm spanish."}, {"id": "453dce485579380e", "bucket": "\u003c100", "title": "How to become a passport bro", "text": "Bro Korean women are first world women. I heard they are just like first world women"}, {"id": "4406b174f2d0cbc0", "bucket": "200-499", "title": "Are Chinese girls in China easy to get?", "text": "Older, I mean over 30. I dated a 36 year old woman who looked like she was in her 20s. Not all older Asian women age well, like everyone else, they need to take care of themselves, and poverty plays a significant role in aging."}, {"id": "53b7d99b8d227f54", "bucket": "\u003c100", "title": "Am I a passport bro?", "text": "To answer your question, no, to be one you actually have to travel to another country"}, {"id": "52140508ffc34b33", "bucket": "200-499", "title": "What do PPBs think of Indian women, in terms of dating and marriage?", "text": "Shouldn't happiness in any relationship be a non-negotiable thing? Not sure why people are generalizing in the comments The population of Indian women is around ~ 700 million in India and around ~ 15 million Indian women live outside India, so any generalization statement isn't applicable on all. Every individual is different and their likes and dislikes are different too"}, {"id": "10a0aa5109f69ab5", "bucket": "100-199", "title": "Everything became so Transactional… any innovative ideas how can we tackle this type of issue? What’s the precautions to take ?", "text": "That’s too much of an age gap to expect it to last. She is less than half his age he should not go for anyone under 40"}, {"id": "3f220eb3e5941c29", "bucket": "100-199", "title": "Meeting someone in a different country for marriage - Advice to not get scammed?", "text": "its always a risk you got to think if the incentive is money they can play the long game for decades"}, {"id": "69b569adaa73fd06", "bucket": "100-199", "title": "GUYS! Stop paying for sex!", "text": "passport bros are #1 rank males and desired by all females we don't pay for sex females pay for our dinner and shopping"}, {"id": "c64a06a8196b1810", "bucket": "\u003c100", "title": "Dating a Filipina is not easy", "text": "when more than one comes, my friends just take both to their room."}, {"id": "0d784f924e999392", "bucket": "\u003c100", "title": "6 Days Solo in Prague with no dating apps; observations, girls and nightlife.", "text": "Bro, that doctor girl. You fucked up big time, what a prize."}, {"id": "d73935b23e561afe", "bucket": "\u003c100", "title": "In which country do people REALLY know how to make love?", "text": "Colombian girls know how"}, {"id": "699a849f996d9ba8", "bucket": "200-499", "title": "Fucked up story but true at least my half of it hopefully more than just half", "text": "Well, like I said at the beginning, I was thinking about it, but I’m not traveling overseas. I was thinking this post might help somebody struggling with something similar that I had been through like I also said."}, {"id": "f4aeed07c36dcfe5", "bucket": "100-199", "title": "Por qué tienes miedo de visitar Cartagena ?", "text": "In English “mid” is a slang expression. Pretende transmitir algo que, en el mejor de los casos, es promedio"}, {"id": "d802d096e38d583d", "bucket": "100-199", "title": "How important is height for a PPB?", "text": "It helps everywhere but is proportionally less important in SEA for example, because they're shorter and you're more exotic."}, {"id": "51648b7470ce761e", "bucket": "\u003c100", "title": "Anyone notice how feminine foreign women are compared to manly American women?", "text": "Sounds like someone's parents need to add parental controls to their children's devices."}, {"id": "8daa1b9fac178532", "bucket": "\u003c100", "title": "Passport Sisters & Indonesian men in Lombok", "text": "Cuz the dude is on the wrong team"}, {"id": "d63976805ceeb91a", "bucket": "200-499", "title": "Anyone else tired of dating apps?", "text": "Depends on where you go. In Uganda, most want LTR, few want casual or are open to casual/FWB In Kenya, I found more ladies were looking for or open to casual/FWB So I guess it depends on the destination."}, {"id": "260be0d94bf4fd24", "bucket": "\u003c100", "title": "Are Chinese girls in China easy to get?", "text": "as a Chinese female, I can tell you that it only happens in your dream or you are scammed 😂"}, {"id": "643d27d89f8ff1e1", "bucket": "100-199", "title": "The stares when dating a local girl", "text": "I mean to be fair they will also stair at white people also. The only place they prob won’t is Russia."}], "label_schema": {"has_pain": "true|false - does this post state a genuine pain (complaint, workflow friction, costly workaround, explicit wish)?", "spans": "list of EXACT substrings of text evidencing each distinct pain; [] when has_pain is false", "note": "optional free text, e.g. why it was a close call"}};
+
+let S = null;          // sample
+let L = {};            // doc_id -> {has_pain, spans[], note}
+let i = 0;
+const $ = id => document.getElementById(id);
+const KEY = () => "gold-labels-" + (S ? S.seed : "x");
+
+$("load").onclick = () => $("file").click();
+$("file").onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { try { boot(JSON.parse(r.result)); } catch (err) { alert("Bad JSON: " + err.message); } };
+  r.readAsText(f);
+};
+
+function boot(sample) {
+  if (!sample.docs) return alert("Not a gold-sample.json (no .docs)");
+  S = sample;
+  // Resume in place: labelling 120 docs is not one sitting.
+  try { L = JSON.parse(localStorage.getItem(KEY())) || {}; } catch { L = {}; }
+  i = S.docs.findIndex(d => !(d.id in L));
+  if (i < 0) i = S.docs.length - 1;
+  // Nothing labelled yet = first sitting, so leave the guide up to be read; the examples
+  // are the whole point of it. Once there is progress, get out of the way.
+  const fresh = Object.keys(L).length === 0;
+  $("guide-lead").textContent = "Read these before you start. Reopen any time with ? Guide.";
+  $("guide").hidden = !fresh;
+  $("app").hidden = false;
+  $("export").disabled = false;
+  render();
+}
+
+function save() { localStorage.setItem(KEY(), JSON.stringify(L)); }
+
+function render() {
+  const done = Object.keys(L).length, n = S.docs.length;
+  $("prog").style.width = (done / n * 100) + "%";
+  $("pos").textContent = `${Math.min(i + 1, n)} / ${n}`;
+  const pains = Object.values(L).filter(x => x.has_pain).length;
+  $("tally").textContent = `${done} labelled · ${pains} pain`;
+  $("back").disabled = i <= 0;
+  $("fwd").disabled = i >= n - 1;
+
+  if (done === n) { $("app").hidden = true; $("done").hidden = false; $("dn").textContent = n; return; }
+  $("app").hidden = false; $("done").hidden = true;
+
+  const d = S.docs[i];
+  const cur = L[d.id];
+  $("title").textContent = d.title || "(no title)";
+  // Deliberately NOT showing d.bucket — length is visible from the text anyway, but naming
+  // the stratum invites the labeller to pattern-match on it.
+  $("meta").textContent = `${d.id} · ${d.text.length} chars`;
+  $("text").textContent = d.text;
+  $("err").textContent = "";
+  $("state").textContent = cur
+    ? (cur.has_pain ? `marked HAS PAIN · ${cur.spans.length} span(s)` : "marked NO PAIN")
+    : "unlabelled";
+  $("yes").style.outline = cur && cur.has_pain ? "2px solid var(--pain)" : "";
+  $("no").style.outline = cur && !cur.has_pain ? "2px solid var(--clean)" : "";
+  renderSpans();
+}
+
+function renderSpans() {
+  const d = S.docs[i], cur = L[d.id];
+  const box = $("spans");
+  box.innerHTML = "";
+  if (!cur || !cur.has_pain) return;
+  cur.spans.forEach((sp, k) => {
+    const row = document.createElement("div");
+    row.className = "span";
+    const c = document.createElement("code");
+    c.textContent = sp;
+    const x = document.createElement("button");
+    x.className = "x"; x.textContent = "×"; x.title = "remove";
+    x.onclick = () => { cur.spans.splice(k, 1); save(); render(); };
+    row.append(c, x);
+    box.append(row);
+  });
+  if (!cur.spans.length) {
+    const h = document.createElement("div");
+    h.className = "hint";
+    h.textContent = "Highlight the evidence text above, then press y (or s to add several).";
+    box.append(h);
+  }
+}
+
+function mark(has) {
+  const d = S.docs[i];
+  L[d.id] = { has_pain: has, spans: has ? (L[d.id]?.spans || []) : [], note: L[d.id]?.note || "" };
+  if (!has) { save(); next(); return; }          // no-pain needs no evidence
+  // Highlight-then-mark is the natural order, so fold a live selection straight in
+  // rather than making the user press s as a separate step.
+  if (addSpan({ quiet: true })) { next(); return; }
+  // Already has spans from earlier presses of s -> nothing left to wait for.
+  if (L[d.id].spans.length) { save(); next(); return; }
+  save(); render();                               // no evidence yet: stay, hint for it
+}
+
+// -> true when a span was actually added. `quiet` suppresses the "select something first"
+// complaint, for callers where an empty selection is a normal state rather than a mistake.
+function addSpan(opts) {
+  const quiet = opts && opts.quiet;
+  const d = S.docs[i];
+  const sel = String(window.getSelection()).trim();
+  $("err").textContent = "";
+  if (!sel) {
+    if (!quiet) $("err").textContent = "Select some text in the post first.";
+    return false;
+  }
+  // Same gate stage 3 enforces in prod: the span must be an exact substring of the source.
+  if (d.text.indexOf(sel) === -1) {
+    $("err").textContent = "That selection is not an exact substring (it may span a scroll edge). Reselect.";
+    return false;
+  }
+  if (!L[d.id] || !L[d.id].has_pain) L[d.id] = { has_pain: true, spans: [], note: L[d.id]?.note || "" };
+  if (L[d.id].spans.includes(sel)) {
+    $("err").textContent = "Already added.";
+    return false;
+  }
+  L[d.id].spans.push(sel);
+  window.getSelection().removeAllRanges();
+  save(); render();
+  return true;
+}
+
+function next() { if (i < S.docs.length - 1) i++; render(); }
+function prev() { if (i > 0) i--; render(); }
+
+function doExport() {
+  const labelled = S.docs.filter(d => d.id in L).length;
+  const out = {
+    sample_seed: S.seed,
+    labelled_at: new Date().toISOString(),
+    n_docs: S.docs.length,
+    n_labelled: labelled,
+    strata: S.strata,
+    labels: S.docs.filter(d => d.id in L).map(d => ({
+      doc_id: d.id, bucket: d.bucket,
+      has_pain: L[d.id].has_pain, spans: L[d.id].spans, note: L[d.id].note || "",
+    })),
+  };
+  const b = new Blob([JSON.stringify(out, null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(b); a.download = "gold-labels.json"; a.click();
+  URL.revokeObjectURL(a.href);
+}
+$("export").onclick = doExport;
+$("yes").onclick = () => mark(true);
+$("no").onclick = () => mark(false);
+$("addspan").onclick = () => addSpan();   // not `= addSpan`: the click Event would land in opts
+$("fwd").onclick = next;
+$("back").onclick = prev;
+$("guidebtn").onclick = () => { $("guide").hidden = !$("guide").hidden; };
+
+if (INLINE_SAMPLE) { $("load").hidden = true; boot(INLINE_SAMPLE); }
+
+document.addEventListener("keydown", e => {
+  if (!S || e.metaKey || e.ctrlKey || /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  const k = e.key.toLowerCase();
+  if (k === "y") { mark(true); e.preventDefault(); }
+  else if (k === "n") { mark(false); e.preventDefault(); }
+  else if (k === "s") { addSpan(); e.preventDefault(); }
+  else if (e.key === "ArrowRight") { next(); e.preventDefault(); }
+  else if (e.key === "ArrowLeft") { prev(); e.preventDefault(); }
+});
+</script>
+</body>
+</html>

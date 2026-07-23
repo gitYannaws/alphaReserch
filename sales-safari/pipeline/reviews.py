@@ -101,8 +101,15 @@ def reviews_run(store, run_id: str, countries=None, max_pages: int = 3,
         progress(0, len(competitors))
     for i, c in enumerate(competitors, start=1):
         app = None
-        for country in countries:
-            app = find_app(c["name"], country)
+        # Stage 9b supplies app_name when the product's store listing differs from its
+        # company name ("Wise" vs "Wise: International Transfers"); fall back to the name.
+        for term in dict.fromkeys([c.get("app_name") or "", c["name"]]):
+            if not term:
+                continue
+            for country in countries:
+                app = find_app(term, country)
+                if app:
+                    break
             if app:
                 break
         if not app:

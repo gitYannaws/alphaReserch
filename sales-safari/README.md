@@ -1,13 +1,13 @@
 # Sales Safari
 
-Niche pain-mining pipeline. Forum-first, with Discourse JSON as the preferred source and Firecrawl as an open-forum fallback. Reddit remains stubbed because API access is gated.
+Niche pain-mining pipeline. Forum-first, with Discourse and Reddit public JSON as preferred sources, XenForo/Playwright rendering for open forums, and Firecrawl as an opt-in fallback/discovery backend.
 
 ## Status
 - [x] M1 - collect (Discourse JSON primary, Firecrawl fallback) + SQLite store + CLI
 - [x] M2 - pain extraction (Claude, exact source-span required)
 - [x] M3 - embed + cluster
 - [x] M4 - demand score + advisory warning flags
-- [x] M5 - competitive intel + rank + ideas + validation + report
+- [x] M5 - rank + ideas + competitor intel + review-grounded briefs + report
 - [x] GUI - FastAPI + vanilla-JS front-end with live full-pipeline progress
 
 ## Web app
@@ -21,7 +21,7 @@ Open http://localhost:8000, paste a seed URL, approve the collector(s) for that 
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt   # Windows
 ```
-`.env` needs `FIRECRAWL_API_KEY` for non-Discourse open forums. Pain extraction tries `claude` first, then falls back to Codex CLI on quota/rate-limit errors.
+`.env` needs `FIRECRAWL_API_KEY` for Firecrawl collection or topic discovery. Pain extraction is provider-configured; the default config tries a local Qwen endpoint first, then falls back to Claude on configured transient errors.
 
 Optional Playwright fallback for open JS-rendered forums:
 ```bash
@@ -46,4 +46,9 @@ Seed = one forum board or a single thread URL. Reports from the web pipeline are
 After a run has clusters, run stages 6-12 from the CLI:
 ```bash
 .venv/Scripts/python -m pipeline.analyze <run_id>
+```
+
+## Checks
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 ```

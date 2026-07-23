@@ -143,7 +143,16 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
                 semantic_refine: bool = True,
                 audit_min_cluster_size: int = DEFAULT_AUDIT_MIN_CLUSTER_SIZE,
                 extract_cfg: dict = None,
-                progress=None) -> dict:
+                progress=None,
+                semantic_label_only: bool = False) -> dict:
+    """`semantic_label_only` = use the audit ONLY to name a theme, never to drop members.
+
+    Measured 2026-07-18: the full audit does not merely split - it omits pains it considers
+    one-off, emitting groups of median size 2 while rank demands >=5 evidence / >=4 authors.
+    Sampling 40 clusters that cleared min_support, 0 survived it. But the audit is also what
+    produced readable theme labels; without it labels fall back to a raw member quote
+    ("Now I am really confused."). Label-only keeps the names and keeps every member.
+    """
     rows = store.get_embeddings(run_id)
     if len(rows) < min_cluster_size:
         store.clear_clusters(run_id)
@@ -190,6 +199,11 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
             pids = [str(ids[i]) for i in part]
             refined = _semantic_groups(store, pids, extract_cfg, min_cluster_size)
             if refined is not None:
+                if semantic_label_only:
+                    # Name the theme from the largest coherent group, keep the cluster whole.
+                    biggest = max(refined, key=lambda g: len(g[0]), default=None)
+                    final.append((part, biggest[1] if biggest else ""))
+                    continue
                 if len(refined) > 1:
                     semantic_splits += 1
                 kept = sum(len(members) for members, _ in refined)

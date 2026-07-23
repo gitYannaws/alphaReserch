@@ -1,5 +1,10 @@
 # Extraction model benchmark notes
 
+> **Superseded in part (2026-07-16).** Haiku's run below was rate-limited/partial, and
+> Codex was only a judge here. A clean, seeded, all-5-models rerun is in
+> [`model-extraction-benchmark-2026-07-16.md`](model-extraction-benchmark-2026-07-16.md).
+> This file is kept for history.
+
 Date: 2026-07-15  
 Pipeline area: post extraction pain-span extraction  
 Primary artifacts:

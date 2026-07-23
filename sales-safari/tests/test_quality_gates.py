@@ -59,8 +59,11 @@ class _SoftFilterStore:
     def clear_soft_filters(self, run_id):
         self.saved.clear()
 
-    def save_soft_filter(self, run_id, cluster_id, solvable, confidence, reason):
+    def save_soft_filter(self, run_id, cluster_id, solvable, confidence, reason,
+                         warnings=None):
         self.saved.append((cluster_id, solvable, confidence, reason))
+        self.warnings = getattr(self, "warnings", {})
+        self.warnings[cluster_id] = list(warnings or [])
 
     def set_stage(self, run_id, stage, status):
         self.stage = (stage, status)

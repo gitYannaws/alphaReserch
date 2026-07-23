@@ -65,12 +65,24 @@ CLAUDE_EXTRACTOR_MODELS = {
     "claude_haiku": "claude-haiku-4-5-20251001",
 }
 
+CODEX_EXTRACTOR_MODELS = {
+    "codex": "gpt-5.6-terra",
+    "codex_gpt56_sol": "gpt-5.6-sol",
+    "codex_gpt56_luna": "gpt-5.6-luna",
+    "codex_gpt55": "gpt-5.5",
+    "codex_gpt54": "gpt-5.4",
+    "codex_gpt54_mini": "gpt-5.4-mini",
+    "codex_spark": "gpt-5.3-codex-spark",
+}
+
 
 def _extractor_providers(name):
     if name in ("qwen", "qwen3", "glm", "local"):
         return [name, "claude"]
     if name in CLAUDE_EXTRACTOR_MODELS:
         return ["claude", "codex"]
+    if name in CODEX_EXTRACTOR_MODELS:
+        return ["codex"]
     return None
 
 
@@ -88,6 +100,15 @@ def _run_config(base_cfg: dict, run: dict) -> dict:
         coll["fallback"] = "firecrawl"
     else:
         coll["fallback"] = "none"
+    # Reddit backfill rest breaks: run.cooldown==0 means the UI toggled them off for this
+    # run (faster, higher ban risk). Mirror webapp _worker: zero the cooldown knobs. NULL/1
+    # (default, or any pre-cooldown-column run) keeps config's cooldowns on.
+    if run.get("cooldown") == 0:
+        reddit = dict(coll.get("reddit", {}))
+        for _k in ("cooldown_every_minutes", "cooldown_minutes",
+                   "backfill_cooldown_every_minutes", "backfill_cooldown_minutes"):
+            reddit[_k] = 0
+        coll["reddit"] = reddit
     cfg["collection"] = coll
     providers = _extractor_providers(run.get("extractor"))
     if providers:
@@ -95,6 +116,9 @@ def _run_config(base_cfg: dict, run: dict) -> dict:
         cfg["extract"]["providers"] = providers
         if run.get("extractor") in CLAUDE_EXTRACTOR_MODELS:
             cfg["extract"]["claude_model"] = CLAUDE_EXTRACTOR_MODELS[run["extractor"]]
+        if run.get("extractor") in CODEX_EXTRACTOR_MODELS:
+            cfg["extract"]["codex"] = dict(cfg["extract"].get("codex", {}))
+            cfg["extract"]["codex"]["model"] = CODEX_EXTRACTOR_MODELS[run["extractor"]]
     return cfg
 
 
@@ -106,11 +130,10 @@ _CORE_ARTIFACTS = [
     (4, "embeddings"),
     (5, "clusters"),
     (6, "demand_scores"),
-    (7, "filter_results"),
-    (8, "competitive_intel"),
+    (7, "soft_filters"),
     (9, "rankings"),
     (10, "ideas"),
-    (11, "validation_plans"),
+    (11, "idea_briefs"),
     (12, "reports"),
 ]
 
@@ -182,29 +205,28 @@ class Runner:
         run = store.get_run(self.job_id)
         seed = run["seed_url"]
         use_corpus = bool(run.get("use_corpus"))
-        limit = (self.cfg.get("collection", {}).get("corpus_max_threads", 10000)
-                 if use_corpus else self.cfg.get("collection", {}).get("max_threads", 100))
+        # Corpus runs always use the corpus cap; a bounded (non-corpus) run honors the
+        # per-run thread_limit the UI sent, falling back to config max_threads.
+        if use_corpus:
+            limit = self.cfg.get("collection", {}).get("corpus_max_threads", 10000)
+        else:
+            limit = run.get("thread_limit") or self.cfg.get("collection", {}).get("max_threads", 100)
         corpus_key = corpus_key_for_seed(seed) if use_corpus else None
         corpus_mode = ""
         known_thread_urls = None
+        known_thread_stats = None
         inherited = {"docs": 0, "threads": 0, "authors": 0}
         if corpus_key:
             store.ensure_corpus(corpus_key, seed)
             store.link_run_to_corpus(self.job_id, corpus_key)
-            inherited = {
-                "docs": store.count_documents(self.job_id),
-                "threads": store.count_topics(self.job_id),
-                "authors": store.count_distinct_authors(self.job_id),
-            }
-            store.set_run_inherited_counts(
-                self.job_id, inherited["docs"], inherited["threads"], inherited["authors"]
-            )
+            inherited = store.ensure_run_inherited_counts(self.job_id)
             corpus = store.get_corpus(corpus_key) or {}
             if bool(run.get("historical")):
                 corpus_mode = "historical"
             else:
                 corpus_mode = "refresh" if corpus.get("backfill_completed_at") else "backfill"
             known_thread_urls = store.get_corpus_thread_urls(corpus_key)
+            known_thread_stats = store.get_corpus_thread_stats(corpus_key)
         def _beat(phase, meta):
             self._check_cancelled()
             note = phase
@@ -235,7 +257,8 @@ class Runner:
             )
         collector, kind = pick_collector(seed, self.cfg, known_thread_urls=known_thread_urls,
                                          corpus_mode=corpus_mode, progress_cb=_beat,
-                                         extra_thread_urls=extra_thread_urls)  # fresh collector each retry
+                                         extra_thread_urls=extra_thread_urls,
+                                         known_thread_stats=known_thread_stats)  # fresh collector each retry
         self.log("STATUS", f"collector={kind} seed={seed} limit={limit}")
         persisted_threads = store.count_topics(self.job_id)
         persisted_docs = store.count_documents(self.job_id)
@@ -292,6 +315,18 @@ class Runner:
                 f"extraction produced 0 pains from {store.count_documents(self.job_id)} docs")
         return f"pains={n}"
 
+    def _verify(self, store):
+        from pipeline.extract import verify_run
+
+        def prog(d, t, k):
+            store.set_progress(self.job_id, 3, d, t, "candidates")
+
+        r = verify_run(store, self.job_id, verify_cfg=self.cfg.get("verify", {}),
+                       extract_cfg=self.cfg.get("extract", {}),
+                       progress=prog, should_stop=self._check_cancelled)
+        return (f"verified kept={r['kept']} rejected={r['rejected']} "
+                f"types={r['by_type']} failed_batches={r['failed_batches']}")
+
     def _embed(self, store):
         from pipeline.embed import embed_run
         embed_run(store, self.job_id, self.cfg.get("embed_model", "BAAI/bge-small-en-v1.5"),
@@ -306,6 +341,7 @@ class Runner:
                         min_cohesion=cc.get("min_cohesion", 0.55),
                         cluster_selection_method=cc.get("cluster_selection_method", "leaf"),
                         semantic_refine=cc.get("semantic_refine", True),
+                        semantic_label_only=cc.get("semantic_label_only", False),
                         audit_min_cluster_size=cc.get("audit_min_cluster_size", 5),
                         extract_cfg=self.cfg.get("extract", {}),
                         progress=lambda d, t: self._set_progress(5, d, t, "steps"))
@@ -317,24 +353,30 @@ class Runner:
                    progress=lambda d, t: self._set_progress(6, d, t, "themes"))
         return f"demand_scores={self._count('demand_scores')}"
 
-    def _filters(self, store):
-        from pipeline.s7_filters import filters_run
-        filters_run(store, self.job_id, self.cfg.get("hard_filters", []),
-                    progress=lambda d, t: self._set_progress(7, d, t, "themes"))
-        return f"filter_results={self._count('filter_results')}"
-
     def _softfilter(self, store):
+        """Stage 7b: one advisory pass = software-fit (LLM) + warning tags (regex).
+        The old stage-7 filters pass was folded in here."""
         from pipeline.s7b_softfilter import softfilter_run
         sf = softfilter_run(store, self.job_id, self.cfg.get("extract", {}),
                             progress=lambda d, t: self._set_progress(7, d, t, "themes"),
-                            batch_size=self.cfg.get("soft_filter", {}).get("batch_size", 40))
-        return f"solvable={sf.get('counts')}"
+                            batch_size=self.cfg.get("soft_filter", {}).get("batch_size", 40),
+                            max_batch_chars=self.cfg.get("soft_filter", {}).get("max_batch_chars", 8000),
+                            enabled_filters=self.cfg.get("hard_filters", []))
+        return f"solvable={sf.get('counts')} warned={sf.get('flagged')}"
 
-    def _compete(self, store):
-        from pipeline.s8_compete import compete_run
-        compete_run(store, self.job_id, self.cfg.get("competitor_sources", []),
-                    progress=lambda d, t: self._set_progress(8, d, t, "themes"))
-        return f"competitive_intel={self._count('competitive_intel')}"
+    def _competitors(self, store):
+        from pipeline.s9b_competitors import competitors_run
+        cc = self.cfg.get("competitors", {})
+        cmp = competitors_run(store, self.job_id,
+                              extract_cfg=self.cfg.get("extract", {}),
+                              model=cc.get("model", "claude-sonnet-5"),
+                              batch_size=cc.get("batch_size", 20),
+                              verify_urls=cc.get("verify_urls", True),
+                              url_timeout=cc.get("url_timeout", 8),
+                              progress=lambda d, t: self._set_progress(10, d, t, "ideas"))
+        return (f"competitors={cmp.get('competitors')} ideas={cmp.get('ideas')}"
+                f"/{cmp.get('covered')} rejected={cmp.get('rejected')}"
+                f" unverified={cmp.get('unverified')}")
 
     def _rank(self, store):
         from pipeline.s9_rank import rank_run
@@ -344,23 +386,6 @@ class Runner:
                      min_support=rank_cfg.get("min_support"),
                      progress=lambda d, t: self._set_progress(9, d, t, "themes"))
         return f"ranked={r['ranked']} dropped={r['dropped']}"
-
-    def _competitors(self, store):
-        from pipeline.s9b_competitors import competitors_run
-        from pipeline.s9_rank import rank_run
-        cmp = competitors_run(store, self.job_id,
-                              top_n=self.cfg.get("ideas", {}).get("top_n", 5),
-                              cover_top=self.cfg.get("competitors", {}).get("cover_top", 20),
-                              extract_cfg=self.cfg.get("extract", {}),
-                              batch_size=self.cfg.get("competitors", {}).get("batch_size", 20),
-                              progress=lambda d, t: self._set_progress(9, d, t, "themes"))
-        # Re-rank so backfilled saturation + solvability move the order before ideas/reviews.
-        rank_cfg = self.cfg.get("rank", {})
-        rank_run(store, self.job_id,
-                 solvable_weights=rank_cfg.get("solvable_weights"),
-                 min_support=rank_cfg.get("min_support"),
-                 progress=lambda d, t: self._set_progress(9, d, t, "themes"))
-        return f"competitors={cmp.get('competitors')} covered={cmp.get('covered')} re-ranked"
 
     def _personas(self, store):
         from pipeline.s3b_personas import personas_run
@@ -377,20 +402,26 @@ class Runner:
                          max_pages=rc.get("max_pages", 3),
                          max_stars=rc.get("max_stars", 2),
                          max_per_competitor=rc.get("max_per_competitor", 25),
-                         progress=lambda d, t: self._set_progress(9, d, t, "apps"))
-        return f"reviews={rv.get('reviews')}"
+                         progress=lambda d, t: self._set_progress(10, d, t, "apps"))
+        return f"reviews={rv.get('reviews')} matched={rv.get('matched')}/{rv.get('competitors')}"
 
     def _ideas(self, store):
         from pipeline.s10_ideas import ideas_run
         r = ideas_run(store, self.job_id, self.cfg.get("ideas", {}).get("top_n", 5),
+                      extract_cfg=self.cfg.get("extract", {}),
+                      model=self.cfg.get("ideas", {}).get("model"),
                       progress=lambda d, t: self._set_progress(10, d, t, "ideas"))
-        return f"ideas={r['ideas']}"
+        return (f"ideas={r['ideas']} (llm={r.get('from_llm')} "
+                f"template={r.get('from_template')} skipped={r.get('skipped')})")
 
-    def _validation(self, store):
-        from pipeline.s11_validation import validation_run
-        validation_run(store, self.job_id,
-                       progress=lambda d, t: self._set_progress(11, d, t, "ideas"))
-        return f"validation_plans={self._count('validation_plans')}"
+    def _brief(self, store):
+        from pipeline.s10b_brief import brief_run
+        bc = self.cfg.get("brief", {})
+        r = brief_run(store, self.job_id,
+                      extract_cfg=self.cfg.get("extract", {}),
+                      model=bc.get("model", "claude-sonnet-5"),
+                      progress=lambda d, t: self._set_progress(11, d, t, "briefs"))
+        return f"briefs={r['briefs']} with_review_evidence={r.get('with_review_evidence')}"
 
     def _report(self, store):
         from pipeline.s12_report import report_run
@@ -406,21 +437,27 @@ class Runner:
         cmp_on = self.cfg.get("competitors", {}).get("enabled", True)
         rv_on = self.cfg.get("reviews", {}).get("enabled", True)
         pers_on = self.cfg.get("personas", {}).get("enabled", True)
+        vf_on = self.cfg.get("verify", {}).get("enabled", True)
+        br_on = self.cfg.get("brief", {}).get("enabled", True)
+        # Idea chain order (changed 2026-07-20): rank -> draft idea -> competitors OF that
+        # idea -> their low-star reviews -> brief built on the gap those reviews expose.
+        # Competitors used to run before rank against raw themes, which both starved the
+        # ideas of competitive context (the top-5 ideas had zero competitors between them)
+        # and let saturation penalise the themes we understood best. See s9_rank docstring.
         return [
             (1,  "collect",     "collecting",             self._collect,     False, True),
             (3,  "extract",     "extracting",             self._extract,     False, True),
+            (3,  "verify",      "verifying",              self._verify,      True,  vf_on),
             (3,  "personas",    "personas",               self._personas,    True,  pers_on),
             (4,  "embed",       "embedding",              self._embed,       False, True),
             (5,  "cluster",     "clustering",             self._cluster,     False, True),
             (6,  "demand",      "scoring",                self._demand,      False, True),
-            (7,  "filters",     "filtering",              self._filters,     False, True),
             (7,  "softfilter",  "soft-filtering",         self._softfilter,  True,  sf_on),
-            (8,  "compete",     "competing",              self._compete,     False, True),
             (9,  "rank",        "ranking",                self._rank,        False, True),
-            (9,  "competitors", "competitor-discovery",   self._competitors, True,  cmp_on),
-            (9,  "reviews",     "review-mining",          self._reviews,     True,  rv_on),
             (10, "ideas",       "ideating",               self._ideas,       False, True),
-            (11, "validation",  "validating",             self._validation,  False, True),
+            (10, "competitors", "competitor-discovery",   self._competitors, True,  cmp_on),
+            (10, "reviews",     "review-mining",          self._reviews,     True,  rv_on),
+            (11, "brief",       "briefing",               self._brief,       True,  br_on),
             (12, "report",      "reporting",              self._report,      False, True),
         ]
 

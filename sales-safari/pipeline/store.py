@@ -14,7 +14,10 @@ from pathlib import Path
 from .collectors.base import Document
 
 _SALT = os.environ.get("SAFARI_SALT", "sales-safari-v1")
-SCHEMA_VERSION = 17
+# Bump whenever a ONE-TIME data repair is added to _migrate(). Plain schema additions
+# (new table / column / index) do not need a bump - they are re-applied idempotently on
+# every connect because they are cheap; one-time repairs are gated on this.
+SCHEMA_VERSION = 18
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
@@ -29,6 +32,8 @@ CREATE TABLE IF NOT EXISTS runs(
   use_corpus INTEGER DEFAULT 0,
   historical INTEGER DEFAULT 0,
   search_assist INTEGER DEFAULT 0,
+  cooldown INTEGER DEFAULT 1,
+  thread_limit INTEGER,
   extractor TEXT,
   extract_provider TEXT,
   extract_model TEXT,
@@ -62,6 +67,10 @@ CREATE TABLE IF NOT EXISTS documents(
   fetched_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_documents_run ON documents(run_id);
+-- get_document_id_by_source_url() runs once per collected document in corpus mode.
+-- Without this it is a full scan of every document ever collected, so collection
+-- degrades quadratically as the corpus grows.
+CREATE INDEX IF NOT EXISTS idx_documents_source_url ON documents(source_url);
 
 CREATE TABLE IF NOT EXISTS run_documents(
   run_id TEXT,
@@ -104,6 +113,9 @@ CREATE TABLE IF NOT EXISTS pains(
   span_start INTEGER,
   span_end INTEGER,
   source_permalink TEXT,
+  verified INTEGER,
+  pain_type TEXT,
+  verify_reason TEXT,
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pains_run ON pains(run_id);
@@ -136,6 +148,7 @@ CREATE TABLE IF NOT EXISTS demand_scores(
   willingness_to_pay REAL,
   reachability REAL,
   recurrence_score REAL,
+  persistence_score REAL,
   demand_score REAL,
   evidence_count INTEGER,
   distinct_authors INTEGER,
@@ -156,7 +169,8 @@ CREATE TABLE IF NOT EXISTS soft_filters(
   run_id TEXT,
   solvable TEXT,
   confidence REAL,
-  reason TEXT
+  reason TEXT,
+  warnings TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_soft_filters_run ON soft_filters(run_id);
 
@@ -178,7 +192,9 @@ CREATE TABLE IF NOT EXISTS competitors(
   url TEXT,
   category TEXT,
   note TEXT,
-  review_domain TEXT
+  review_domain TEXT,
+  weakness TEXT,
+  app_name TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_competitors_run ON competitors(run_id);
 CREATE INDEX IF NOT EXISTS idx_competitors_cluster ON competitors(cluster_id);
@@ -225,6 +241,26 @@ CREATE TABLE IF NOT EXISTS ideas(
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ideas_run ON ideas(run_id);
+
+-- Stage 10b: the built-out brief for an idea, written AFTER its competitors and their
+-- low-star reviews are known, so the wedge is grounded in a named incumbent's actual
+-- failure rather than guessed. `has_review_evidence` records honestly whether any 1-2 star
+-- review backed the gap - a wedge with 0 is a hypothesis, not a finding, and the UI says so.
+CREATE TABLE IF NOT EXISTS idea_briefs(
+  idea_id TEXT PRIMARY KEY,
+  run_id TEXT,
+  cluster_id TEXT,
+  problem TEXT,
+  target_user TEXT,
+  wedge TEXT,
+  incumbents TEXT,           -- JSON [{name,url,fails_at,evidence:[{quote,rating,source_url}]}]
+  mvp TEXT,                  -- JSON [str]
+  risks TEXT,                -- JSON [str]
+  has_review_evidence INTEGER DEFAULT 0,
+  review_quote_count INTEGER DEFAULT 0,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_idea_briefs_run ON idea_briefs(run_id);
 
 CREATE TABLE IF NOT EXISTS validation_plans(
   id TEXT PRIMARY KEY,
@@ -294,7 +330,12 @@ def _migrate(conn):
     _ensure_column(conn, "pains", "source_permalink", "source_permalink TEXT")
     _ensure_column(conn, "pains", "persona_canonical", "persona_canonical TEXT")
     _ensure_column(conn, "demand_scores", "recurrence_score", "recurrence_score REAL")
+    _ensure_column(conn, "demand_scores", "persistence_score", "persistence_score REAL")
     _ensure_column(conn, "demand_scores", "scoring_evidence", "scoring_evidence TEXT")
+    # Stage 9b now asks about a drafted idea, so it can say where each incumbent falls
+    # short for THAT idea, and hand stage 9c a searchable app name.
+    _ensure_column(conn, "competitors", "weakness", "weakness TEXT")
+    _ensure_column(conn, "competitors", "app_name", "app_name TEXT")
     _ensure_column(conn, "rankings", "solvable_weight", "solvable_weight REAL")
     _ensure_column(conn, "rankings", "rank_breakdown", "rank_breakdown TEXT")
     _ensure_column(conn, "runs", "error", "error TEXT")
@@ -313,17 +354,35 @@ def _migrate(conn):
     _ensure_column(conn, "runs", "code_version", "code_version TEXT")
     _ensure_column(conn, "runs", "config_hash", "config_hash TEXT")
     _ensure_column(conn, "runs", "server_started_at", "server_started_at TEXT")
+    _ensure_column(conn, "runs", "cooldown", "cooldown INTEGER DEFAULT 1")
+    _ensure_column(conn, "runs", "thread_limit", "thread_limit INTEGER")
+    # Stage 3b verify: candidate pains (verified NULL) get a type + keep/reject verdict.
+    _ensure_column(conn, "pains", "verified", "verified INTEGER")
+    _ensure_column(conn, "pains", "pain_type", "pain_type TEXT")
+    _ensure_column(conn, "pains", "verify_reason", "verify_reason TEXT")
+    # Stage 7 (regex warning tags) merged into 7b: one advisory pass, one row per theme.
+    _ensure_column(conn, "soft_filters", "warnings", "warnings TEXT")
     _ensure_column(conn, "runs", "inherited_doc_count", "inherited_doc_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_topic_count", "inherited_topic_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_author_count", "inherited_author_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "last_topic_found_at", "last_topic_found_at TEXT")
     _ensure_column(conn, "runs", "updated_at", "updated_at TEXT")
     _ensure_column(conn, "corpora", "backfill_completed_at", "backfill_completed_at TEXT")
-    conn.execute(
-        "INSERT OR IGNORE INTO run_documents(run_id, document_id, collected_at) "
-        "SELECT run_id, id, fetched_at FROM documents WHERE run_id IS NOT NULL"
-    )
-    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    # --- one-time data repairs, gated on user_version ---
+    # Everything above is idempotent and costs ~4ms, so it re-runs on every connect and
+    # stays correct even if someone forgets to bump SCHEMA_VERSION. What follows scans
+    # every document, so it must NOT: this Store is constructed per web request, and an
+    # ungated backfill charged ~580ms to each one to insert zero rows.
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < 17:
+        # Pre-run_documents rows kept their link in documents.run_id alone.
+        conn.execute(
+            "INSERT OR IGNORE INTO run_documents(run_id, document_id, collected_at) "
+            "SELECT run_id, id, fetched_at FROM documents WHERE run_id IS NOT NULL"
+        )
+    if version != SCHEMA_VERSION:
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     conn.commit()
 
 
@@ -332,7 +391,11 @@ class Store:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path, timeout=30)
         self.conn.execute("PRAGMA busy_timeout=30000")
-        self.conn.execute("PRAGMA foreign_keys=ON")
+        # The webapp, its background worker and `python -m pipeline.resume` all share this
+        # one file. Under the default rollback journal a writer blocks readers outright, so
+        # a long collect run freezes the GUI. WAL lets readers run against the last
+        # committed snapshot while a write is in flight. Persists in the file once set.
+        self.conn.execute("PRAGMA journal_mode=WAL")
         _migrate(self.conn)
 
     def start_run(self, run_id: str, seed_url: str, use_render: bool = False,
@@ -344,22 +407,47 @@ class Store:
                   prompt_version: str | None = None,
                   code_version: str | None = None,
                   config_hash: str | None = None,
-                  server_started_at: str | None = None):
+                  server_started_at: str | None = None,
+                  cooldown: bool = True, thread_limit: int | None = None):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT OR REPLACE INTO runs("
-            "job_id,seed_url,stage,status,error,note,use_render,use_firecrawl,use_corpus,historical,search_assist,extractor,"
+            "job_id,seed_url,stage,status,error,note,use_render,use_firecrawl,use_corpus,historical,search_assist,"
+            "cooldown,thread_limit,extractor,"
             "extract_provider,extract_model,extract_base_url,extract_config_json,prompt_version,"
             "code_version,config_hash,server_started_at,"
             "inherited_doc_count,inherited_topic_count,inherited_author_count,last_topic_found_at,updated_at,created_at"
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, seed_url, 1, "collecting", None, None, int(bool(use_render)),
              int(bool(use_firecrawl)), int(bool(use_corpus)), int(bool(historical)),
-             int(bool(search_assist)), extractor, extract_provider, extract_model,
+             int(bool(search_assist)), int(bool(cooldown)),
+             int(thread_limit) if thread_limit else None,
+             extractor, extract_provider, extract_model,
              extract_base_url, extract_config_json, prompt_version, code_version,
-             config_hash, server_started_at, 0, 0, 0, None, now, now))
+             config_hash, server_started_at, None, None, None, None, now, now))
         self.conn.commit()
+
+    def ensure_run_inherited_counts(self, run_id: str) -> dict:
+        """Snapshot the corpus baseline for a run, once, and return it.
+
+        Display counters are (current totals - this baseline), so the baseline must stay
+        pinned to what the corpus held when the run first started collecting. A resumed run
+        has already collected into the corpus, so re-snapshotting would fold its own work
+        into the baseline and report 0 new from then on. NULL = never snapshotted; an
+        explicit 0 (first run on an empty corpus) is a real baseline and is not re-taken.
+        """
+        row = self.conn.execute(
+            "SELECT inherited_doc_count, inherited_topic_count, inherited_author_count "
+            "FROM runs WHERE job_id=?", (run_id,)).fetchone()
+        if row and row[0] is not None:
+            return {"docs": row[0], "threads": row[1] or 0, "authors": row[2] or 0}
+        counts = {"docs": self.count_documents(run_id),
+                  "threads": self.count_topics(run_id),
+                  "authors": self.count_distinct_authors(run_id)}
+        self.set_run_inherited_counts(
+            run_id, counts["docs"], counts["threads"], counts["authors"])
+        return counts
 
     def set_run_inherited_counts(self, run_id: str, docs: int, topics: int, authors: int):
         from datetime import datetime, timezone
@@ -440,7 +528,8 @@ class Store:
 
     def get_run(self, run_id: str):
         cols = ["job_id", "seed_url", "stage", "status", "error", "note", "use_render",
-                "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor",
+                "use_firecrawl", "use_corpus", "historical", "search_assist",
+                "cooldown", "thread_limit", "extractor",
                 "extract_provider", "extract_model", "extract_base_url", "extract_config_json",
                 "prompt_version", "code_version", "config_hash", "server_started_at",
                 "inherited_doc_count",
@@ -454,7 +543,8 @@ class Store:
             return []
         placeholders = ",".join("?" for _ in statuses)
         cols = ["job_id", "seed_url", "stage", "status", "error", "note", "use_render",
-                "use_firecrawl", "use_corpus", "historical", "search_assist", "extractor",
+                "use_firecrawl", "use_corpus", "historical", "search_assist",
+                "cooldown", "thread_limit", "extractor",
                 "extract_provider", "extract_model", "extract_base_url", "extract_config_json",
                 "prompt_version", "code_version", "config_hash", "server_started_at",
                 "inherited_doc_count",
@@ -542,7 +632,7 @@ class Store:
         for tbl in ("pains", "embeddings", "clusters", "demand_scores",
                     "filter_results", "soft_filters", "competitive_intel",
                     "competitors", "competitor_reviews", "rankings", "ideas",
-                    "validation_plans", "reports", "run_documents"):
+                    "idea_briefs", "validation_plans", "reports", "run_documents"):
             c.execute(f"DELETE FROM {tbl} WHERE run_id=?", (run_id,))
         # Orphan documents = no run_documents or corpus_documents link left.
         c.execute(
@@ -558,9 +648,14 @@ class Store:
         did = _doc_id(d)
         author_hash = _hash_author(d.author)
         if self.conn.execute("SELECT 1 FROM documents WHERE id=?", (did,)).fetchone():
+            # score/created_at are COALESCEd, not overwritten: a re-collect that fails to
+            # read them (hidden score, DOM shift, archived thread) yields None, and letting
+            # that land would silently wipe a real upvote count that stage 6 folds into
+            # frequency. A real value still replaces an older one.
             self.conn.execute(
                 "UPDATE documents SET source_granularity=?, permalink=?, title=?, "
-                "raw_markdown=?, author_hash=?, thread_url=?, created_at=?, score=?, fetched_at=? "
+                "raw_markdown=?, author_hash=?, thread_url=?, "
+                "created_at=COALESCE(?, created_at), score=COALESCE(?, score), fetched_at=? "
                 "WHERE id=?",
                 (d.source_granularity, d.permalink, d.title, d.raw_markdown,
                  author_hash, d.thread_url, d.created_at, d.score, d.fetched_at, did))
@@ -718,6 +813,21 @@ class Store:
             (corpus_key,),
         ).fetchall()
         return {r[0] for r in rows if r and r[0]}
+
+    def get_corpus_thread_stats(self, corpus_key: str) -> dict:
+        """Per-thread {thread_url: {count, max_created_at}} for DELTA refresh: a collector
+        can skip a thread whose upstream last-post timestamp hasn't moved past what we
+        already hold, instead of re-fetching every thread on every refresh."""
+        rows = self.conn.execute(
+            "SELECT d.thread_url, COUNT(*), MAX(d.created_at) "
+            "FROM corpus_documents cd "
+            "JOIN documents d ON d.id=cd.document_id "
+            "WHERE cd.corpus_key=? AND d.thread_url IS NOT NULL AND TRIM(d.thread_url)<>'' "
+            "GROUP BY d.thread_url",
+            (corpus_key,),
+        ).fetchall()
+        return {r[0]: {"count": r[1] or 0, "max_created_at": r[2] or ""}
+                for r in rows if r and r[0]}
 
     def list_corpora(self, prefix: str = ""):
         where = "WHERE c.corpus_key LIKE ?" if prefix else ""
@@ -967,11 +1077,61 @@ class Store:
         self.conn.commit()
 
     def get_pains(self, run_id: str):
+        # Single choke point for stages 4-12: a stage-3b verify verdict of 0 (rejected) is
+        # withheld here, so embed/cluster/demand/rank never see it. NULL = never verified
+        # (old runs, or verify disabled/pending) and is kept, so nothing regresses.
         cols = ["id", "complaint", "workflow_pain", "wish", "verbatim_span",
                 "span_start", "span_end", "source_permalink", "author_hash", "persona"]
         rows = self.conn.execute(
-            f"SELECT {','.join(cols)} FROM pains WHERE run_id=?", (run_id,)).fetchall()
+            f"SELECT {','.join(cols)} FROM pains WHERE run_id=? AND COALESCE(verified,1)!=0",
+            (run_id,)).fetchall()
         return [dict(zip(cols, r)) for r in rows]
+
+    def get_unverified_pains(self, run_id: str, limit: int | None = None):
+        """Stage-3b input: candidate pains awaiting a verdict, each with enough of its
+        source doc to judge whether the span is a real, product-shaped pain (a bare span
+        can't be judged - "Sweden's expensive" needs context to tell complaint from advice)."""
+        sql = ("SELECT p.id, p.complaint, p.workflow_pain, p.wish, p.workaround, "
+               "p.verbatim_span, p.span_start, d.title, d.raw_markdown "
+               "FROM pains p JOIN documents d ON d.id=p.document_id "
+               "WHERE p.run_id=? AND p.verified IS NULL")
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        cols = ["id", "complaint", "workflow_pain", "wish", "workaround",
+                "verbatim_span", "span_start", "title", "raw_markdown"]
+        return [dict(zip(cols, r)) for r in self.conn.execute(sql, (run_id,)).fetchall()]
+
+    def set_pain_verdict(self, pain_id: str, pain_type: str, verified: int, reason: str = ""):
+        self.conn.execute(
+            "UPDATE pains SET pain_type=?, verified=?, verify_reason=? WHERE id=?",
+            (pain_type, int(verified), reason or "", pain_id))
+        self.conn.commit()
+
+    def count_unverified_pains(self, run_id: str) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM pains WHERE run_id=? AND verified IS NULL",
+            (run_id,)).fetchone()[0]
+
+    def count_pains_by_verdict(self, run_id: str) -> dict:
+        rows = self.conn.execute(
+            "SELECT COALESCE(pain_type,'(unjudged)'), "
+            "SUM(CASE WHEN verified=1 THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN verified=0 THEN 1 ELSE 0 END) "
+            "FROM pains WHERE run_id=? GROUP BY pain_type", (run_id,)).fetchall()
+        return {r[0]: {"kept": r[1] or 0, "rejected": r[2] or 0} for r in rows}
+
+    def reapply_verify_policy(self, run_id: str, keep_types: list[str]) -> int:
+        """Recompute verified from the stored pain_type against a new keep_types policy -
+        no LLM. Lets 'which pain types count' be a reversible config knob: flip keep_types,
+        re-run this, and stages 4-12 see the new selection without re-judging anything."""
+        keep = [t.strip().lower() for t in (keep_types or []) if t.strip()]
+        placeholders = ",".join("?" for _ in keep) or "''"
+        cur = self.conn.execute(
+            f"UPDATE pains SET verified=CASE WHEN LOWER(pain_type) IN ({placeholders}) "
+            "THEN 1 ELSE 0 END WHERE run_id=? AND pain_type IS NOT NULL",
+            (*keep, run_id))
+        self.conn.commit()
+        return cur.rowcount
 
     def get_document_rows(self, run_id: str, limit: int = 60):
         rows = self.conn.execute(
@@ -1080,12 +1240,13 @@ class Store:
     def save_demand_score(self, run_id: str, cluster_id: str, score: dict):
         self.conn.execute(
             "INSERT OR REPLACE INTO demand_scores(cluster_id,run_id,pain_intensity,"
-            "frequency,willingness_to_pay,reachability,recurrence_score,demand_score,evidence_count,"
-            "distinct_authors,scoring_evidence) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "frequency,willingness_to_pay,reachability,recurrence_score,persistence_score,"
+            "demand_score,evidence_count,distinct_authors,scoring_evidence) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (cluster_id, run_id, score["pain_intensity"], score["frequency"],
              score["willingness_to_pay"], score["reachability"],
-             score.get("recurrence_score", 0), score["demand_score"],
-             score["evidence_count"], score["distinct_authors"],
+             score.get("recurrence_score", 0), score.get("persistence_score", 3),
+             score["demand_score"], score["evidence_count"], score["distinct_authors"],
              json.dumps(score.get("scoring_evidence", {}))))
         self.conn.commit()
 
@@ -1107,11 +1268,14 @@ class Store:
         self.conn.commit()
 
     def save_soft_filter(self, run_id: str, cluster_id: str, solvable: str,
-                         confidence: float, reason: str):
+                         confidence: float, reason: str, warnings=None):
+        """One advisory row per theme: software-fit (LLM) + warning tags (regex, stage-7
+        patterns folded in here). `warnings` is a list of tag names, stored as JSON."""
         self.conn.execute(
-            "INSERT OR REPLACE INTO soft_filters(cluster_id,run_id,solvable,confidence,reason) "
-            "VALUES(?,?,?,?,?)",
-            (cluster_id, run_id, solvable, confidence, reason))
+            "INSERT OR REPLACE INTO soft_filters"
+            "(cluster_id,run_id,solvable,confidence,reason,warnings) VALUES(?,?,?,?,?,?)",
+            (cluster_id, run_id, solvable, confidence, reason,
+             json.dumps(list(warnings or []))))
         self.conn.commit()
 
     # ---- stage 9.5: competitor discovery ----
@@ -1124,22 +1288,23 @@ class Store:
             f"{run_id}::{cluster_id}::{c.get('name','')}".encode("utf-8")).hexdigest()[:16]
         self.conn.execute(
             "INSERT OR REPLACE INTO competitors(id,run_id,cluster_id,name,url,category,"
-            "note,review_domain) VALUES(?,?,?,?,?,?,?,?)",
+            "note,review_domain,weakness,app_name) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (cid, run_id, cluster_id, c.get("name", ""), c.get("url", ""),
-             c.get("category", ""), c.get("note", ""), c.get("review_domain", "")))
+             c.get("category", ""), c.get("note", ""), c.get("review_domain", ""),
+             c.get("weakness", ""), c.get("app_name", "")))
         self.conn.commit()
         return cid
 
     def get_competitors(self, run_id: str, cluster_id: str = None):
+        cols = ["id", "cluster_id", "name", "url", "category", "note", "review_domain",
+                "weakness", "app_name"]
+        base = (f"SELECT {','.join(cols)} FROM competitors WHERE run_id=?")
+        args = [run_id]
         if cluster_id:
-            rows = self.conn.execute(
-                "SELECT id,cluster_id,name,url,category,note,review_domain FROM competitors "
-                "WHERE run_id=? AND cluster_id=? ORDER BY name", (run_id, cluster_id)).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT id,cluster_id,name,url,category,note,review_domain FROM competitors "
-                "WHERE run_id=? ORDER BY cluster_id,name", (run_id,)).fetchall()
-        cols = ["id", "cluster_id", "name", "url", "category", "note", "review_domain"]
+            base += " AND cluster_id=?"
+            args.append(cluster_id)
+        base += " ORDER BY cluster_id,name" if not cluster_id else " ORDER BY name"
+        rows = self.conn.execute(base, args).fetchall()
         return [dict(zip(cols, r)) for r in rows]
 
     # ---- stage 9.6: competitor low-star reviews ----
@@ -1195,17 +1360,20 @@ class Store:
 
     def set_saturation(self, run_id: str, cluster_id: str, saturation: float,
                        incumbent_count: int = None):
-        """Backfill real saturation onto an existing competitive_intel row (from discovered
-        competitor counts), so rank reflects competition instead of the inert heuristic."""
-        if incumbent_count is None:
-            self.conn.execute(
-                "UPDATE competitive_intel SET saturation_score=? WHERE run_id=? AND cluster_id=?",
-                (saturation, run_id, cluster_id))
-        else:
-            self.conn.execute(
-                "UPDATE competitive_intel SET saturation_score=?, incumbent_count=? "
-                "WHERE run_id=? AND cluster_id=?",
-                (saturation, incumbent_count, run_id, cluster_id))
+        """Upsert real saturation (from discovered competitor counts) into competitive_intel.
+        Competitor discovery now runs BEFORE rank and is the only writer of this table, so this
+        must INSERT the row if absent. Persistence lives in demand_scores now; competitive_intel
+        carries only competition signals."""
+        cnt = incumbent_count or 0
+        gap = ("No competing product surfaced; verify the space is really open."
+               if not cnt else
+               f"{cnt} competing product(s) found; verify differentiation before pursuing.")
+        self.conn.execute(
+            "INSERT INTO competitive_intel(cluster_id,run_id,incumbent_count,saturation_score,"
+            "persistence_score,gap_summary) VALUES(?,?,?,?,NULL,?) "
+            "ON CONFLICT(cluster_id) DO UPDATE SET saturation_score=excluded.saturation_score,"
+            "incumbent_count=excluded.incumbent_count,gap_summary=excluded.gap_summary",
+            (cluster_id, run_id, cnt, saturation, gap))
         self.conn.commit()
 
     def get_solvable_map(self, run_id: str) -> dict:
@@ -1294,10 +1462,8 @@ class Store:
 
     def get_ideas(self, run_id: str):
         rows = self.conn.execute(
-            "SELECT i.id,i.cluster_id,i.title,i.pitch,i.evidence_permalink,"
-            "v.kill_test,v.metric,v.threshold,v.timeframe,v.channel "
-            "FROM ideas i LEFT JOIN validation_plans v ON v.idea_id=i.id "
-            "WHERE i.run_id=? ORDER BY i.created_at",
+            "SELECT id,cluster_id,title,pitch,evidence_permalink "
+            "FROM ideas WHERE run_id=? ORDER BY created_at",
             (run_id,)).fetchall()
         return [{
             "id": r[0],
@@ -1305,22 +1471,47 @@ class Store:
             "title": r[2],
             "pitch": r[3],
             "evidence_permalink": r[4],
-            "kill_test": r[5],
-            "metric": r[6],
-            "threshold": r[7],
-            "timeframe": r[8],
-            "channel": r[9],
         } for r in rows]
 
-    def save_validation_plan(self, run_id: str, idea_id: str, plan: dict):
-        vid = hashlib.sha1(f"{run_id}::{idea_id}".encode("utf-8")).hexdigest()[:16]
-        self.conn.execute(
-            "INSERT OR REPLACE INTO validation_plans(id,run_id,idea_id,kill_test,"
-            "metric,threshold,timeframe,channel) VALUES(?,?,?,?,?,?,?,?)",
-            (vid, run_id, idea_id, plan["kill_test"], plan["metric"],
-             plan["threshold"], plan["timeframe"], plan["channel"]))
+    # ---- stage 10b: built-out idea briefs ----
+    def clear_briefs(self, run_id: str):
+        self.conn.execute("DELETE FROM idea_briefs WHERE run_id=?", (run_id,))
         self.conn.commit()
-        return vid
+
+    def save_brief(self, run_id: str, idea_id: str, cluster_id: str, b: dict):
+        from datetime import datetime, timezone
+        self.conn.execute(
+            "INSERT OR REPLACE INTO idea_briefs(idea_id,run_id,cluster_id,problem,"
+            "target_user,wedge,incumbents,mvp,risks,has_review_evidence,"
+            "review_quote_count,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (idea_id, run_id, cluster_id, b.get("problem", ""), b.get("target_user", ""),
+             b.get("wedge", ""), json.dumps(b.get("incumbents") or []),
+             json.dumps(b.get("mvp") or []), json.dumps(b.get("risks") or []),
+             1 if b.get("has_review_evidence") else 0,
+             int(b.get("review_quote_count") or 0),
+             datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+
+    def get_briefs(self, run_id: str, idea_id: str = None):
+        base = ("SELECT idea_id,cluster_id,problem,target_user,wedge,incumbents,mvp,risks,"
+                "has_review_evidence,review_quote_count FROM idea_briefs WHERE run_id=?")
+        args = [run_id]
+        if idea_id:
+            base += " AND idea_id=?"
+            args.append(idea_id)
+        rows = self.conn.execute(base, args).fetchall()
+        return [{
+            "idea_id": r[0],
+            "cluster_id": r[1],
+            "problem": r[2],
+            "target_user": r[3],
+            "wedge": r[4],
+            "incumbents": json.loads(r[5] or "[]"),
+            "mvp": json.loads(r[6] or "[]"),
+            "risks": json.loads(r[7] or "[]"),
+            "has_review_evidence": bool(r[8]),
+            "review_quote_count": r[9] or 0,
+        } for r in rows]
 
     # ---- stage 12: report ----
     def save_report(self, run_id: str, path: str):

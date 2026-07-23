@@ -10,3 +10,4 @@ sentence-transformers>=3
 hdbscan>=0.8
 umap-learn>=0.5
 numpy>=1.26
+zstandard

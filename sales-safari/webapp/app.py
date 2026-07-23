@@ -2,6 +2,7 @@
 
 Run: .venv/Scripts/python -m uvicorn webapp.app:app --port 8000
 """
+import asyncio
 import json
 import hashlib
 import os
@@ -48,15 +49,25 @@ DISCOVERIES: dict = {}  # discover_id -> live topic-discovery state
 KICKOFFS: dict = {}  # kickoff_id -> live sequential-queue progress
 KICKOFF_MIN, KICKOFF_MAX = 3, 15
 ACTIVE_RUN_STATUSES = {"starting", "collecting", "collecting-paused", "storing",
-                       "extracting", "personas", "embedding",
+                       "extracting", "verifying", "personas", "embedding",
                        "clustering", "scoring", "filtering", "soft-filtering", "competing",
                        "competitor-discovery", "review-mining", "ranking", "ideating",
-                       "validating", "reporting", "stopping", "recovering"}
+                       "briefing", "validating", "reporting", "stopping", "recovering"}
 
 CLAUDE_EXTRACTOR_MODELS = {
     "claude": "claude-sonnet-4-6",  # backward-compatible old UI value
     "claude_sonnet": "claude-sonnet-4-6",
     "claude_haiku": "claude-haiku-4-5-20251001",
+}
+
+CODEX_EXTRACTOR_MODELS = {
+    "codex": ("ChatGPT/Codex 5.6 Terra", "gpt-5.6-terra"),
+    "codex_gpt56_sol": ("ChatGPT/Codex 5.6 Sol", "gpt-5.6-sol"),
+    "codex_gpt56_luna": ("ChatGPT/Codex 5.6 Luna", "gpt-5.6-luna"),
+    "codex_gpt55": ("ChatGPT/Codex 5.5", "gpt-5.5"),
+    "codex_gpt54": ("ChatGPT/Codex 5.4", "gpt-5.4"),
+    "codex_gpt54_mini": ("ChatGPT/Codex 5.4 Mini", "gpt-5.4-mini"),
+    "codex_spark": ("ChatGPT/Codex Spark", "gpt-5.3-codex-spark"),
 }
 
 
@@ -68,11 +79,18 @@ def _extractor_options(run_cfg: dict) -> list[dict]:
         "glm": "GLM",
     }
     options = []
-    for key in ("qwen", "qwen3", "claude_sonnet", "claude_haiku", "glm"):
+    for key in (
+        "qwen", "qwen3", "claude_sonnet", "claude_haiku",
+        "codex", "codex_gpt56_sol", "codex_gpt56_luna", "codex_gpt55",
+        "codex_gpt54", "codex_gpt54_mini", "codex_spark", "glm",
+    ):
         if key in CLAUDE_EXTRACTOR_MODELS:
             model = CLAUDE_EXTRACTOR_MODELS[key]
             family = "Sonnet 4.6" if key == "claude_sonnet" else "Haiku 4.5"
             detail = f"Claude {family} ({model})"
+        elif key in CODEX_EXTRACTOR_MODELS:
+            name, model = CODEX_EXTRACTOR_MODELS[key]
+            detail = f"{name} ({model})"
         else:
             model = (extract_cfg.get(key, {}) or {}).get("model")
             detail = f"{labels[key]} ({model})" if model else labels[key]
@@ -98,7 +116,7 @@ class RunReq(BaseModel):
     historical: bool = False      # corpus mode: favor older unseen threads, not refresh
     search_assist: bool = False   # Firecrawl web-search extra Reddit thread URLs before listing walk
     cooldown: bool = True          # Reddit backfill rest breaks (45m work / 30m pause); off = faster, riskier
-    extractor: Optional[str] = None  # None/"claude_sonnet"/"claude_haiku" | "qwen" | "qwen3" | "glm"
+    extractor: Optional[str] = None  # None/"claude_sonnet"/"claude_haiku"/"codex*" | "qwen" | "qwen3" | "glm"
 
 
 def _collector_to_toggles(collector: Optional[str]) -> tuple[bool, bool]:
@@ -122,6 +140,8 @@ def _extractor_providers(name):
         return [name, "claude"]
     if name in CLAUDE_EXTRACTOR_MODELS:
         return ["claude", "codex"]
+    if name in CODEX_EXTRACTOR_MODELS:
+        return ["codex"]
     return None
 
 
@@ -133,6 +153,9 @@ def _apply_extractor_override(run_cfg: dict, extractor: Optional[str]) -> None:
     run_cfg["extract"]["providers"] = providers
     if extractor in CLAUDE_EXTRACTOR_MODELS:
         run_cfg["extract"]["claude_model"] = CLAUDE_EXTRACTOR_MODELS[extractor]
+    if extractor in CODEX_EXTRACTOR_MODELS:
+        run_cfg["extract"]["codex"] = dict(run_cfg["extract"].get("codex", {}))
+        run_cfg["extract"]["codex"]["model"] = CODEX_EXTRACTOR_MODELS[extractor][1]
 
 
 def _code_version() -> str:
@@ -305,6 +328,23 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
             f"saved posts; stopping before report."
         )
 
+    # Stage 3b: verify (advisory) — type-classify each candidate pain and apply the
+    # keep_types policy. Rejected candidates are withheld from get_pains, so stages 4-12
+    # only cluster/score verified pains. A verify outage leaves them all as kept.
+    if run_cfg.get("verify", {}).get("enabled", True):
+        _check_cancelled(job)
+        job.update(status="verifying")
+        _set_stage_progress(3, 0, 0, "candidates")
+        from pipeline.extract import verify_run
+        vr = _stage(job, "stage 3b verify", lambda: verify_run(
+            store, job_id, verify_cfg=run_cfg.get("verify", {}),
+            extract_cfg=run_cfg.get("extract", {}),
+            progress=lambda d, t, k: (_check_cancelled(job),
+                                      store.set_progress(job_id, 3, d, t, "candidates")),
+            should_stop=lambda: _check_cancelled(job)), advisory=True)
+        if vr is not None:
+            job.update(pains=store.count_pains(job_id), verify=vr)
+
     # Stage 3.5: persona canonicalization (advisory) — consolidate free-text personas
     # into a small reusable segment set for filtering.
     if run_cfg.get("personas", {}).get("enabled", True):
@@ -342,6 +382,7 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
         min_cohesion=_cl_cfg.get("min_cohesion", 0.55),
         cluster_selection_method=_cl_cfg.get("cluster_selection_method", "leaf"),
         semantic_refine=_cl_cfg.get("semantic_refine", True),
+        semantic_label_only=_cl_cfg.get("semantic_label_only", False),
         audit_min_cluster_size=_cl_cfg.get("audit_min_cluster_size", 5),
         extract_cfg=run_cfg.get("extract", {}),
         progress=lambda d, t: _set_stage_progress(5, d, t, "steps")))
@@ -356,40 +397,30 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
            lambda: demand_run(store, job_id, run_cfg.get("scoring_weights", {}),
                               progress=lambda d, t: _set_stage_progress(6, d, t, "themes")))
 
-    # Stage 7: hard filters.
-    job.update(status="filtering", stage=7)
-    store.set_stage(job_id, 7, "filtering")
-    _set_stage_progress(7, 0, 0, "")
-    from pipeline.s7_filters import filters_run
-    _stage(job, "stage 7 filters",
-           lambda: filters_run(store, job_id, run_cfg.get("hard_filters", []),
-                               progress=lambda d, t: _set_stage_progress(7, d, t, "themes")))
-
-    # Stage 7.5: soft software-solvability filter (advisory color tag, never drops).
+    # Stage 7b: one advisory pass — software-solvability (LLM) + warning tags (regex).
+    # The old separate stage-7 filters pass was folded in here: it was free regex over the
+    # same clusters, so a second stage bought nothing. Neither ever drops a theme.
+    job.update(stage=7)
     if run_cfg.get("soft_filter", {}).get("enabled", True):
         _check_cancelled(job)
         job.update(status="soft-filtering")
+        store.set_stage(job_id, 7, "soft-filtering")
+        _set_stage_progress(7, 0, 0, "")
         from pipeline.s7b_softfilter import softfilter_run
-        sf = _stage(job, "stage 7.5 soft-filter",
+        sf = _stage(job, "stage 7b soft-filter",
                     lambda: softfilter_run(store, job_id, run_cfg.get("extract", {}),
                                            progress=lambda d, t: _set_stage_progress(7, d, t, "themes"),
-                                           batch_size=run_cfg.get("soft_filter", {}).get("batch_size", 40)),
+                                           batch_size=run_cfg.get("soft_filter", {}).get("batch_size", 40),
+                                           max_batch_chars=run_cfg.get("soft_filter", {}).get("max_batch_chars", 8000),
+                                           enabled_filters=run_cfg.get("hard_filters", [])),
                     advisory=True)
         if sf is not None:
-            job.update(solvable=sf.get("counts"))
+            job.update(solvable=sf.get("counts"), warned=sf.get("flagged"))
         else:
             job.update(soft_filter_error="gave up after retries")
 
-    # Stage 8: competition.
-    job.update(status="competing", stage=8)
-    store.set_stage(job_id, 8, "competing")
-    _set_stage_progress(8, 0, 0, "")
-    from pipeline.s8_compete import compete_run
-    _stage(job, "stage 8 compete",
-           lambda: compete_run(store, job_id, run_cfg.get("competitor_sources", []),
-                               progress=lambda d, t: _set_stage_progress(8, d, t, "themes")))
-
-    # Stage 9: rank (demand x persistence / saturation x solvable_weight).
+    # Stage 9: rank (demand x persistence x solvable_weight). Saturation is NOT a divisor
+    # any more - competitor discovery now runs after this, against the drafted ideas.
     job.update(status="ranking", stage=9)
     store.set_stage(job_id, 9, "ranking")
     _set_stage_progress(9, 0, 0, "")
@@ -402,32 +433,41 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
                                      progress=lambda d, t: _set_stage_progress(9, d, t, "themes")))
     job.update(ranked=ranked["ranked"], dropped=ranked["dropped"])
 
-    # Stage 9.5: competitor discovery (advisory). Covers the top `cover_top` themes in
-    # one call, backfills real saturation, then we RE-RANK so competition + solvability
-    # actually move the order before ideas/reviews use the top-N.
-    if run_cfg.get("competitors", {}).get("enabled", True):
+    # Stage 10a: draft one idea per top-ranked theme. Everything below builds on these.
+    job.update(status="ideating", stage=10)
+    store.set_stage(job_id, 10, "ideating")
+    _set_stage_progress(10, 0, 0, "")
+    from pipeline.s10_ideas import ideas_run
+    ideas = _stage(job, "stage 10 ideas",
+                   lambda: ideas_run(store, job_id, run_cfg.get("ideas", {}).get("top_n", 5),
+                                     extract_cfg=run_cfg.get("extract", {}),
+                                     model=run_cfg.get("ideas", {}).get("model"),
+                                     progress=lambda d, t: _set_stage_progress(10, d, t, "ideas")))
+    job.update(ideas=ideas["ideas"])
+
+    # Stage 9b: competitors OF each drafted idea (advisory). Only a handful of ideas, so a
+    # strong model is affordable; every URL is HTTP-checked before the competitor is kept.
+    cmp_cfg = run_cfg.get("competitors", {})
+    if cmp_cfg.get("enabled", True):
         _check_cancelled(job)
-        job.update(status="competitor-discovery")
+        job.update(status="competitor-discovery", stage=10)
+        store.set_stage(job_id, 10, "competitor-discovery")
+        _set_stage_progress(10, 0, 0, "")
         from pipeline.s9b_competitors import competitors_run
-        cmp = _stage(job, "stage 9.5 competitors", lambda: competitors_run(
+        cmp = _stage(job, "stage 9b competitors", lambda: competitors_run(
             store, job_id,
-            top_n=run_cfg.get("ideas", {}).get("top_n", 5),
-            cover_top=run_cfg.get("competitors", {}).get("cover_top", 20),
             extract_cfg=run_cfg.get("extract", {}),
-            batch_size=run_cfg.get("competitors", {}).get("batch_size", 20),
-            progress=lambda d, t: _set_stage_progress(9, d, t, "themes")), advisory=True)
+            model=cmp_cfg.get("model", "claude-sonnet-5"),
+            batch_size=cmp_cfg.get("batch_size", 20),
+            verify_urls=cmp_cfg.get("verify_urls", True),
+            url_timeout=cmp_cfg.get("url_timeout", 8),
+            progress=lambda d, t: _set_stage_progress(10, d, t, "ideas")), advisory=True)
         if cmp is not None:
             job.update(competitors=cmp.get("competitors"))
-            # Re-rank now that saturation reflects real competitor counts.
-            ranked = _stage(job, "stage 9.7 re-rank",
-                            lambda: rank_run(store, job_id, solvable_weights=_rank_w,
-                                             min_support=_rank_cfg.get("min_support"),
-                                             progress=lambda d, t: _set_stage_progress(9, d, t, "themes")))
-            job.update(ranked=ranked["ranked"], dropped=ranked["dropped"])
         else:
             job.update(competitor_error="gave up after retries")
 
-    # Stage 9.6: mine 1-2 star app-store reviews of those competitors (incumbent gaps).
+    # Stage 9c: mine 1-2 star app-store reviews of those competitors (incumbent gaps).
     rev_cfg = run_cfg.get("reviews", {})
     if rev_cfg.get("enabled", True):
         _check_cancelled(job)
@@ -439,30 +479,30 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
             max_pages=rev_cfg.get("max_pages", 3),
             max_stars=rev_cfg.get("max_stars", 2),
             max_per_competitor=rev_cfg.get("max_per_competitor", 25),
-            progress=lambda d, t: _set_stage_progress(9, d, t, "apps")), advisory=True)
+            progress=lambda d, t: _set_stage_progress(10, d, t, "apps")), advisory=True)
         if rv is not None:
             job.update(reviews=rv.get("reviews"))
         else:
             job.update(review_error="gave up after retries")
 
-    # Stage 10: ideas.
-    job.update(status="ideating", stage=10)
-    store.set_stage(job_id, 10, "ideating")
-    _set_stage_progress(10, 0, 0, "")
-    from pipeline.s10_ideas import ideas_run
-    ideas = _stage(job, "stage 10 ideas",
-                   lambda: ideas_run(store, job_id, run_cfg.get("ideas", {}).get("top_n", 5),
-                                     progress=lambda d, t: _set_stage_progress(10, d, t, "ideas")))
-    job.update(ideas=ideas["ideas"])
-
-    # Stage 11: validation.
-    job.update(status="validating", stage=11)
-    store.set_stage(job_id, 11, "validating")
-    _set_stage_progress(11, 0, 0, "")
-    from pipeline.s11_validation import validation_run
-    _stage(job, "stage 11 validation",
-           lambda: validation_run(store, job_id,
-                                  progress=lambda d, t: _set_stage_progress(11, d, t, "ideas")))
+    # Stage 10b: build each idea out into a full brief, wedged on what those reviews expose.
+    br_cfg = run_cfg.get("brief", {})
+    if br_cfg.get("enabled", True):
+        _check_cancelled(job)
+        job.update(status="briefing", stage=11)
+        store.set_stage(job_id, 11, "briefing")
+        _set_stage_progress(11, 0, 0, "")
+        from pipeline.s10b_brief import brief_run
+        br = _stage(job, "stage 10b brief", lambda: brief_run(
+            store, job_id,
+            extract_cfg=run_cfg.get("extract", {}),
+            model=br_cfg.get("model", "claude-sonnet-5"),
+            progress=lambda d, t: _set_stage_progress(11, d, t, "briefs")), advisory=True)
+        if br is not None:
+            job.update(briefs=br.get("briefs"),
+                       briefs_with_evidence=br.get("with_review_evidence"))
+        else:
+            job.update(brief_error="gave up after retries")
 
     # Stage 12: report.
     job.update(status="reporting", stage=12)
@@ -570,16 +610,10 @@ def _worker(job_id: str, seed: str, limit: int, use_render: bool, use_firecrawl:
             wd.start()
             if corpus_key:
                 store.link_run_to_corpus(job_id, corpus_key)
-                inherited = {
-                    "docs": store.count_documents(job_id),
-                    "threads": store.count_topics(job_id),
-                    "authors": store.count_distinct_authors(job_id),
-                }
-                store.set_run_inherited_counts(
-                    job_id, inherited["docs"], inherited["threads"], inherited["authors"]
-                )
+                inherited = store.ensure_run_inherited_counts(job_id)
                 job.update(collector=f"corpus+{corpus_mode or 'sync'}")
             known_thread_urls = store.get_corpus_thread_urls(corpus_key) if corpus_key else None
+            known_thread_stats = store.get_corpus_thread_stats(corpus_key) if corpus_key else None
             extra_thread_urls = None
             if job.get("search_assist") and RedditCollector.is_reddit(seed):
                 rc = run_cfg.get("collection", {}).get("reddit", {})
@@ -592,7 +626,8 @@ def _worker(job_id: str, seed: str, limit: int, use_render: bool, use_firecrawl:
                 job.update(search_assist_hits=len(extra_thread_urls or []))
             collector, kind = pick_collector(seed, run_cfg, known_thread_urls=known_thread_urls,
                                              corpus_mode=corpus_mode, progress_cb=_beat,
-                                             extra_thread_urls=extra_thread_urls)
+                                             extra_thread_urls=extra_thread_urls,
+                                             known_thread_stats=known_thread_stats)
             job.update(collector=kind if not corpus_key else f"{kind}+corpus-{corpus_mode or 'sync'}")
             persisted_threads = store.count_topics(job_id)
             persisted_docs = store.count_documents(job_id)
@@ -892,13 +927,34 @@ def start_run(req: RunReq):
         use_render, use_firecrawl = _collector_to_toggles(req.collector)
     else:
         use_render, use_firecrawl = req.use_render, req.use_firecrawl
-    job_id, limit = _register_job(seed, use_render, use_firecrawl,
-                                  req.use_corpus, req.extractor, req.cooldown,
-                                  req.historical, req.search_assist)
-    if req.limit and not req.use_corpus:
-        limit = req.limit
-    threading.Thread(target=_worker, args=(job_id, seed, limit, use_render,
-                     use_firecrawl, req.extractor, req.use_corpus), daemon=True).start()
+    job_id = uuid.uuid4().hex[:12]
+    thread_limit = req.limit if (req.limit and not req.use_corpus) else None
+    # Persist the full run row up front, then drive collection from a standalone
+    # `pipeline.resume` subprocess -- the same runner the startup reconcile uses. The run
+    # then survives this HTTP server being reaped/restarted, instead of dying with an
+    # in-process worker thread. Every per-run choice the UI made (render/firecrawl, corpus,
+    # historical, search-assist, cooldown, thread limit, extractor) is stored so the
+    # subprocess -- and any later reconcile respawn -- reconstructs the run from the DB
+    # alone. Deliberately no JOBS entry: /api/status and /api/run/{id}/stop then fall
+    # through to their persisted-state / resume-runner branches.
+    store = Store(DB)
+    try:
+        run_cfg = _run_config(seed, use_render, use_firecrawl)
+        _apply_extractor_override(run_cfg, req.extractor)
+        store.start_run(job_id, seed, use_render=use_render, use_firecrawl=use_firecrawl,
+                        use_corpus=req.use_corpus, extractor=req.extractor,
+                        historical=bool(req.historical),
+                        search_assist=bool(req.search_assist),
+                        cooldown=bool(req.cooldown), thread_limit=thread_limit,
+                        **_extract_provenance(run_cfg, req.extractor))
+        if req.use_corpus:
+            corpus_key = corpus_key_for_seed(seed)
+            store.ensure_corpus(corpus_key, seed)
+            # Auto-track the seed as a Source so it lists on the Sources/corpora pages.
+            store.add_source(uuid.uuid4().hex[:12], seed, None, corpus_key)
+    finally:
+        store.close()
+    _spawn_resume_runner(job_id)
     return {"job_id": job_id}
 
 
@@ -939,56 +995,100 @@ def delete_source(source_id: str):
         store.close()
 
 
+def _lane_key(url: str) -> str:
+    """Rate limits are per-domain, so the politeness unit is the host - normalized so
+    www./old./new. mirrors of one site land in the same lane."""
+    host = urlparse(url).netloc.lower()
+    for prefix in ("www.", "old.", "new.", "m."):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+            break
+    return host or url
+
+
+def _lane_plan(sources: list[dict]) -> list[list[tuple[int, dict]]]:
+    """Group (original_index, source) by domain, preserving order within each lane."""
+    lanes: dict[str, list] = {}
+    for i, src in enumerate(sources):
+        lanes.setdefault(_lane_key(src["url"]), []).append((i, src))
+    return list(lanes.values())
+
+
 def _kickoff_worker(kickoff_id: str, sources: list[dict], mode: str, use_render: bool,
                     use_firecrawl: bool, use_corpus: bool, extractor: Optional[str],
                     cooldown: bool = True, historical: bool = False,
-                    search_assist: bool = False):
+                    search_assist: bool = False, max_lanes: int = 3):
+    """Run kickoff sources in per-domain LANES: sources on different domains collect
+    concurrently (their rate limits are independent), sources on the SAME domain stay
+    strictly sequential - a Reddit lane is exactly as polite as the old serial queue.
+    `max_lanes` bounds concurrent lanes (each render lane can hold a Chromium)."""
     kickoff = KICKOFFS[kickoff_id]
-    store = Store(DB)
-    try:
-        for i, src in enumerate(sources):
-            if kickoff.get("stop_requested"):
-                kickoff["status"] = "stopped"
-                return
-            seed = src["url"]
-            items = kickoff.setdefault("items", [])
-            if i < len(items):
-                item = items[i]
+    lanes = _lane_plan(sources)
+    sem = threading.Semaphore(max(1, int(max_lanes or 3)))
+    lock = threading.Lock()
+    active: set[str] = set()
+    items = kickoff.setdefault("items", [])
+
+    def _run_source(i: int, src: dict, store: Store):
+        seed = src["url"]
+        item = items[i]
+        store.mark_source_queued(src["id"])
+        try:
+            if mode == "analyze":
+                corpus_key = src.get("corpus_key") or corpus_key_for_seed(seed)
+                job_id, _ = _register_job(seed, False, False, True, extractor, cooldown,
+                                          historical, search_assist)
+                with lock:
+                    kickoff["current_job_id"] = job_id
+                    kickoff["job_ids"].append(job_id)
+                item.update(status="running", job_id=job_id)
+                _analyze_worker(job_id, corpus_key, seed, extractor)
             else:
-                item = dict(source_id=src["id"], seed=seed, label=src.get("label"),
-                            corpus_key=src.get("corpus_key"), status="queued",
-                            job_id=None, stage=None, error=None)
-                items.append(item)
-            kickoff["current_index"] = i
-            kickoff["current_source"] = src.get("label") or seed
-            store.mark_source_queued(src["id"])
+                job_id, limit = _register_job(seed, use_render, use_firecrawl, use_corpus,
+                                              extractor, cooldown, historical, search_assist)
+                with lock:
+                    kickoff["current_job_id"] = job_id
+                    kickoff["job_ids"].append(job_id)
+                item.update(status="running", job_id=job_id)
+                _worker(job_id, seed, limit, use_render, use_firecrawl, extractor, use_corpus)
+            final_job = JOBS.get(job_id, {})
+            item.update(status=final_job.get("status", "done"),
+                        stage=final_job.get("stage"),
+                        error=final_job.get("error"))
+        except Exception as e:
+            item.update(status="error", error=str(e))
+            print(f"[kickoff] {kickoff_id} ({mode}) source {seed} failed: {e}", flush=True)
+
+    def _lane_runner(lane: list):
+        with sem:
+            store = Store(DB)  # SQLite connections are per-thread; WAL handles concurrency
             try:
-                if mode == "analyze":
-                    corpus_key = src.get("corpus_key") or corpus_key_for_seed(seed)
-                    job_id, _ = _register_job(seed, False, False, True, extractor, cooldown,
-                                              historical, search_assist)
-                    kickoff["current_job_id"] = job_id
-                    kickoff["job_ids"].append(job_id)
-                    item.update(status="running", job_id=job_id)
-                    _analyze_worker(job_id, corpus_key, seed, extractor)
-                else:
-                    job_id, limit = _register_job(seed, use_render, use_firecrawl, use_corpus,
-                                                  extractor, cooldown, historical, search_assist)
-                    kickoff["current_job_id"] = job_id
-                    kickoff["job_ids"].append(job_id)
-                    item.update(status="running", job_id=job_id)
-                    _worker(job_id, seed, limit, use_render, use_firecrawl, extractor, use_corpus)
-                final_job = JOBS.get(job_id, {})
-                item.update(status=final_job.get("status", "done"),
-                            stage=final_job.get("stage"),
-                            error=final_job.get("error"))
-            except Exception as e:
-                item.update(status="error", error=str(e))
-                print(f"[kickoff] {kickoff_id} ({mode}) source {seed} failed: {e}", flush=True)
-            kickoff["done"] = i + 1
-        kickoff["status"] = "done"
-    finally:
-        store.close()
+                for i, src in lane:
+                    if kickoff.get("stop_requested"):
+                        return
+                    label = src.get("label") or src["url"]
+                    with lock:
+                        active.add(label)
+                        kickoff["current_index"] = i
+                        kickoff["current_source"] = ", ".join(sorted(active))
+                    try:
+                        _run_source(i, src, store)
+                    finally:
+                        with lock:
+                            active.discard(label)
+                            kickoff["done"] = kickoff.get("done", 0) + 1
+                            kickoff["current_source"] = ", ".join(sorted(active)) or None
+            finally:
+                store.close()
+
+    threads = [threading.Thread(target=_lane_runner, args=(lane,),
+                                name=f"kickoff-lane-{n}", daemon=True)
+               for n, lane in enumerate(lanes)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    kickoff["status"] = "stopped" if kickoff.get("stop_requested") else "done"
 
 
 @app.post("/api/sources/kickoff")
@@ -1026,10 +1126,11 @@ def kickoff_sources(req: KickoffReq):
                                             status="queued", job_id=None,
                                             stage=None, error=None)
                                        for s in sources])
+    max_lanes = int((CFG.get("kickoff") or {}).get("max_lanes", 3) or 3)
     threading.Thread(target=_kickoff_worker,
                      args=(kickoff_id, sources, mode, use_render, use_firecrawl,
                            req.use_corpus, req.extractor, req.cooldown,
-                           req.historical, req.search_assist), daemon=True).start()
+                           req.historical, req.search_assist, max_lanes), daemon=True).start()
     return {"kickoff_id": kickoff_id}
 
 
@@ -1274,12 +1375,22 @@ def _spawn_resume_runner(job_id: str):
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
     )
+    argv = [sys.executable, "-m", "pipeline.resume", job_id]
     if sys.platform.startswith("win"):
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return subprocess.Popen(
-        [sys.executable, "-m", "pipeline.resume", job_id],
-        **kwargs,
-    )
+        # Detach the runner so it outlives this server being reaped/tree-killed, not just a
+        # clean exit. DETACHED_PROCESS gives it no console, CREATE_NEW_PROCESS_GROUP isolates
+        # it from console/Ctrl-C signals, and CREATE_BREAKAWAY_FROM_JOB lets it escape a
+        # parent Job object set to kill children on close. Breakaway raises if the Job
+        # forbids it, so fall back to a plain detached spawn. (The startup reconcile still
+        # respawns anything that slips through, so this is best-effort, not the only net.)
+        DETACHED_PROCESS = 0x00000008
+        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+        base = DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            return subprocess.Popen(argv, creationflags=base | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+        except OSError:
+            return subprocess.Popen(argv, creationflags=base, **kwargs)
+    return subprocess.Popen(argv, start_new_session=True, **kwargs)
 
 
 def _reconcile_orphaned_runs():
@@ -1373,6 +1484,25 @@ def status(job_id: str):
             "dropped": None, "ideas": counts["ideas"],
             "stop_requested": run["status"] == "cancelled", "progress": progress,
             "report": report_row["path"] if report_row else None, "persisted_only": True}
+
+
+@app.on_event("startup")
+async def _quiet_proactor_reset_noise():
+    # On Windows' ProactorEventLoop a client that drops an HTTP connection abruptly makes
+    # _call_connection_lost raise ConnectionResetError [WinError 10054] inside a callback.
+    # The request already completed, so it is harmless, but asyncio logs it as an unhandled
+    # exception -- which reads like a server crash. Swallow just that one case and defer
+    # everything else to the existing handler.
+    loop = asyncio.get_running_loop()
+    default = loop.get_exception_handler()
+
+    def handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError) and getattr(exc, "winerror", None) == 10054:
+            return
+        (default or loop.default_exception_handler)(context)
+
+    loop.set_exception_handler(handler)
 
 
 @app.on_event("startup")
@@ -1473,7 +1603,7 @@ def pains(job_id: str, limit: int = 0):
            "LEFT JOIN cluster_members cm ON cm.pain_id=p.id "
            "LEFT JOIN clusters c ON c.id=cm.cluster_id AND c.run_id=p.run_id "
            "LEFT JOIN soft_filters sf ON sf.cluster_id=c.id AND sf.run_id=p.run_id "
-           "WHERE p.run_id=?")
+           "WHERE p.run_id=? AND COALESCE(p.verified,1)!=0")
     params = [job_id]
     if limit and limit > 0:
         sql += " LIMIT ?"
@@ -1526,6 +1656,14 @@ def ideas(job_id: str):
 def competitors(job_id: str):
     store = Store(DB)
     out = store.get_competitors(job_id)
+    store.close()
+    return out
+
+
+@app.get("/api/run/{job_id}/briefs")
+def briefs(job_id: str):
+    store = Store(DB)
+    out = store.get_briefs(job_id)
     store.close()
     return out
 

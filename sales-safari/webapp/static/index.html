@@ -44,7 +44,7 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   .stat span{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
   .badge{display:inline-block;padding:2px 9px;border-radius:16px;font-size:12px;border:1px solid var(--line)}
   .badge.starting,.badge.collecting,.badge.storing,.badge.extracting,.badge.embedding,.badge.clustering,.badge.scoring,.badge.filtering,.badge.competing,.badge.ranking,.badge.ideating,.badge.validating,.badge.reporting{color:var(--acc);border-color:var(--acc)}
-  .badge.soft-filtering,.badge.competitor-discovery,.badge.review-mining{color:var(--acc);border-color:var(--acc)}
+  .badge.soft-filtering,.badge.competitor-discovery,.badge.review-mining,.badge.verifying,.badge.personas,.badge.briefing{color:var(--acc);border-color:var(--acc)}
   .badge.done,.badge.reported{color:var(--ok);border-color:var(--ok)}.badge.error,.badge.cancelled,.badge.interrupted{color:var(--err);border-color:var(--err)}
   .badge.recovering{color:#7fb5ff;border-color:#7fb5ff}
   .badge.resting{color:#ffd166;border-color:#ffd166}
@@ -64,6 +64,13 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
   th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
   td.dim{color:var(--mut);white-space:nowrap}td.big{font-variant-numeric:tabular-nums;font-weight:700}
+  /* Wide tables scroll inside their own box instead of bleeding past the card edge
+     (which pushed the row action buttons outside the panel). */
+  .table-wrap{overflow-x:auto}
+  td.wrap{white-space:normal}                       /* opt out of td.dim's nowrap */
+  td.seed{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  td.rowact{white-space:nowrap;text-align:right}
+  td.rowact button{margin-left:4px}
   a{color:var(--acc);text-decoration:none}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
   .idea{border:1px solid var(--line);border-radius:8px;padding:12px;background:#13151a}
@@ -74,6 +81,18 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   .revs{margin:3px 0 6px}.revs summary{cursor:pointer;color:var(--err);font-size:12px}
   .revs ul{margin:4px 0 0;padding-left:16px}.revs li{margin:3px 0;color:var(--mut);font-size:12px}
   .revs .star{color:var(--err);letter-spacing:-1px}
+  .comps .gap{color:var(--err);font-size:12px}
+  .brief{margin:10px 0;border-left:2px solid var(--line);padding-left:12px}
+  .brief .bsec{margin:0 0 10px}
+  .brief .bsec>b{display:block;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin-bottom:3px}
+  .brief .bsec p{margin:0;color:#cfd3dc;font-size:13px}
+  .brief .bsec ul{margin:2px 0 0;padding-left:18px;font-size:13px;color:#cfd3dc}
+  .brief .bsec li{margin:3px 0}
+  .brief blockquote{margin:4px 0 6px;padding-left:8px;border-left:2px solid var(--err);color:var(--mut);font-size:12px}
+  .brief blockquote .star{color:var(--err);letter-spacing:-1px}
+  .eb{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:9px;font-size:10px;letter-spacing:0;text-transform:none}
+  .eb.ok{background:#16301f;color:#5fd08a;border:1px solid #2c6b45}
+  .eb.warn{background:#332414;color:#e0a458;border:1px solid #7a5320}
   .step{cursor:help}
   .filters-off{opacity:.4;pointer-events:none;filter:grayscale(1)}
   .slicers{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-bottom:12px}
@@ -103,7 +122,10 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   .solv.yes{background:var(--ok)}.solv.partial{background:var(--acc)}.solv.no{background:var(--mut);opacity:.55}
   .solv.unknown{background:transparent;border:1px solid var(--line)}
   .solvlegend{margin:10px 2px 0;font-size:12px;color:var(--mut);display:flex;gap:18px;flex-wrap:wrap}
-  .actions{display:flex;gap:8px;align-items:center}
+  /* wrap so filter/action bars reflow on narrow viewports instead of overflowing the card
+     (and squashing the status select down to an unusable sliver) */
+  .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .actions select,.actions input{min-width:90px}
   .pager{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
   .pager button:disabled{opacity:.35;cursor:default}
   .modeswitch{display:flex;margin-bottom:14px;width:max-content;border:1px solid var(--line);border-radius:6px;overflow:hidden}
@@ -139,6 +161,13 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
           <option value="qwen3">Qwen3 14B (local)</option>
           <option value="claude_sonnet">Claude Sonnet 4.6 (claude-sonnet-4-6)</option>
           <option value="claude_haiku">Claude Haiku 4.5 (claude-haiku-4-5-20251001)</option>
+          <option value="codex">ChatGPT/Codex 5.6 Terra (gpt-5.6-terra)</option>
+          <option value="codex_gpt56_sol">ChatGPT/Codex 5.6 Sol (gpt-5.6-sol)</option>
+          <option value="codex_gpt56_luna">ChatGPT/Codex 5.6 Luna (gpt-5.6-luna)</option>
+          <option value="codex_gpt55">ChatGPT/Codex 5.5 (gpt-5.5)</option>
+          <option value="codex_gpt54">ChatGPT/Codex 5.4 (gpt-5.4)</option>
+          <option value="codex_gpt54_mini">ChatGPT/Codex 5.4 Mini (gpt-5.4-mini)</option>
+          <option value="codex_spark">ChatGPT/Codex Spark (gpt-5.3-codex-spark)</option>
           <option value="glm">GLM (local)</option>
         </select>
       </div>
@@ -186,8 +215,10 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
       </div>
     </div>
     <div class="help">Green <b>legit</b> = real people posting (distinct authors). Orange <b>weak</b> = forum-shaped but authorship unverified. Red <b>reject</b> = blog / SEO / product page — fails the real-poster check. Each ticked source runs as its own job.</div>
+    <div class="table-wrap">
     <table><thead><tr><th style="width:28px"><input type="checkbox" id="selAll" title="select/clear all runnable"></th><th>Source</th><th>Collector</th><th>Verdict</th><th>Signal</th><th>Why</th></tr></thead>
     <tbody id="candidates"></tbody></table>
+    </div>
   </div>
 
   <div class="card" id="statusCard" style="display:none">
@@ -230,8 +261,10 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
         <button id="refreshRuns" class="secondary">Refresh</button>
       </div>
     </div>
+    <div class="table-wrap">
     <table><thead><tr><th>Run</th><th>Seed</th><th>Status</th><th>Updated</th><th>Counts</th><th></th></tr></thead>
     <tbody id="runs"></tbody></table>
+    </div>
     <div class="pager" id="runsPager">
       <span class="dim" id="runsPageInfo"></span>
       <div class="actions">
@@ -243,13 +276,15 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
 
   <div class="card" id="rankingsCard" style="display:none">
     <label>Ranked themes</label>
+    <div class="table-wrap">
     <table><thead><tr><th>Rank</th><th>Theme</th><th>Score</th><th>Demand</th><th>Recur</th><th>Persist</th><th>Sat.</th><th>Authors</th></tr></thead>
     <tbody id="rankings"></tbody></table>
+    </div>
     <div class="solvlegend"><span><span class="solv yes"></span>software-solvable</span><span><span class="solv partial"></span>partial (needs hardware/service)</span><span><span class="solv no"></span>not software</span><span><span class="solv unknown"></span>unclassified</span></div>
   </div>
 
   <div class="card" id="ideasCard" style="display:none">
-    <label>Product ideas and kill tests</label>
+    <label>Product ideas</label>
     <div class="grid" id="ideas"></div>
   </div>
 
@@ -281,8 +316,10 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
       </div>
       <button id="pClear" class="secondary" style="padding:4px 12px;font-size:12px">Clear</button>
     </div>
+    <div class="table-wrap">
     <table><thead><tr><th>Persona</th><th>Theme</th><th>Complaint / wish</th><th>Verbatim span</th><th>Source</th></tr></thead>
     <tbody id="pains"></tbody></table>
+    </div>
   </div>
 
   <div class="card" id="reportCard" style="display:none">
@@ -293,36 +330,37 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
 
 <script>
 let RUNS=[], RUNS_TOTAL=0, RUN_PAGE_SIZE=25, RUN_OFFSET=0, EXTRACTOR_OPTIONS={};
-const STEPS = ["collect","store","extract","embed","cluster","score","warnings","software fit","compete","rank","competitors","reviews","ideas","validate","report"];
+// Stage 3 is split into 3a extract + 3b verify; stage 7 (warning flags) was folded into 7b,
+// so "software fit" now covers solvability AND warnings.
+// Idea chain order (2026-07-20): rank -> ideas -> competitors OF those ideas -> their
+// low-star reviews -> brief. Competitors used to run before rank against raw themes.
+const STEPS = ["collect","store","extract","verify","embed","cluster","score","software fit","rank","ideas","competitors","reviews","brief","report"];
 const STEP_FOR_STATUS = {
   starting:0, collecting:0, "collecting-paused":0, storing:1,
-  extracting:2, personas:2, embedding:3, clustering:4, scoring:5,
-  filtering:6, "soft-filtering":7, competing:8, ranking:9,
-  "competitor-discovery":10, "review-mining":11, ideating:12,
-  validating:13, reporting:14, reported:14, done:14
+  extracting:2, verifying:3, personas:3, embedding:4, clustering:5, scoring:6,
+  "soft-filtering":7, filtering:7, ranking:8, ideating:9,
+  "competitor-discovery":10, "review-mining":11, briefing:12,
+  reporting:13, reported:13, done:13
 };
-const STEP_FOR_STAGE = {1:0,2:1,3:2,4:3,5:4,6:5,7:6,8:8,9:9,10:12,11:13,12:14};
-const STAGE_NAME = {1:"collect",2:"store",3:"extract",4:"embed",5:"cluster",6:"score",7:"warnings",8:"compete",9:"rank",10:"ideas",11:"validate",12:"report"};
+const STEP_FOR_STAGE = {1:0,2:1,3:2,4:4,5:5,6:6,7:7,9:8,10:9,11:12,12:13};
+const STAGE_NAME = {1:"collect",2:"store",3:"extract",4:"embed",5:"cluster",6:"score",7:"software fit",9:"rank",10:"ideas",11:"brief",12:"report"};
 const STEP_DESC = {
   collect:"Stage 1 — Scrape the community: pull posts and comments from the seed forum / subreddit (per-author where possible).",
   store:"Stage 2 — Save canonical documents to SQLite, de-duplicated by URL and linked to this run.",
-  extract:"Stage 3 — LLM pulls pain signals from each post. Every pain must carry an exact verbatim quote as evidence.",
+  extract:"Stage 3a — LLM pulls pain signals from each post, casting a WIDE net for recall. Every pain must carry an exact verbatim quote as evidence.",
+  verify:"Stage 3b — Second pass type-classifies each candidate pain (product friction / wish / cost / social vs advice / off-topic). verify.keep_types decides which survive; rejected pains are withheld from clustering. Off = no precision gate.",
   embed:"Stage 4 — Vectorize each pain with local bge embeddings so similar pains can be grouped.",
   cluster:"Stage 5 — Group pains into themes (hdbscan), counting DISTINCT authors — one loud user is not a market.",
   score:"Stage 6 — Demand score per theme: pain intensity, frequency, willingness-to-pay, reachability.",
-  filter:"Stage 7 - Advisory warning flags: SOC2/HIPAA, marketplace, closed API, regulated liability.",
-  compete:"Stage 8 — Competition signals: persistence (do complaints outlive incumbents?) and saturation (how crowded).",
-  rank:"Stage 9 — Rank = demand x persistence / (1+saturation) x solvable-weight. Competitors discovered here feed saturation.",
-  ideas:"Stage 10 — Generate product-idea stubs for the top-ranked themes.",
-  validate:"Stage 11 — One falsifiable kill-test per idea (metric, threshold, timeframe, channel).",
+  ideas:"Stage 10a — LLM drafts one concrete product idea per top-ranked theme. Themes it cannot honestly build a product from are skipped and backfilled from further down the ranking.",
   report:"Stage 12 — Markdown report with permalinked evidence.",
 };
-STEP_DESC.warnings = "Stage 7 - Advisory warning flags: SOC2/HIPAA, marketplace, closed API, regulated liability.";
-STEP_DESC["software fit"] = "Stage 7.5 - Soft filter: whether a pure software product can solve the theme.";
+STEP_DESC["software fit"] = "Stage 7b - One advisory pass: can a pure software product solve the theme (LLM), PLUS regex warning tags (visa/banking/in-person/language/logistics). Neither ever drops a theme - min_support at rank is the gate.";
 STEP_DESC.score = "Stage 6 - Demand score: intensity, frequency, willingness-to-pay, reachability, recurrence.";
-STEP_DESC.rank = "Stage 9 - Rank = demand x persistence / (1+saturation) x solvable weight.";
-STEP_DESC.competitors = "Stage 9.5 - Discover existing products and backfill saturation before re-ranking.";
-STEP_DESC.reviews = "Stage 9.6 - Mine low-star competitor reviews for incumbent gaps.";
+STEP_DESC.rank = "Stage 9 - Rank = demand x persistence x solvable weight. Saturation is NOT a divisor: it used to punish exactly the themes we had found competitors for, while themes the model knew nothing about ranked free.";
+STEP_DESC.competitors = "Stage 9b - Find the real products that already compete with each DRAFTED IDEA. Runs on a few ideas, so it uses a strong model; every URL is HTTP-checked, and magazines/nonprofits are rejected.";
+STEP_DESC.reviews = "Stage 9c - Mine 1-2 star App Store reviews of those competitors: their own users saying where the incumbent fails.";
+STEP_DESC.brief = "Stage 10b - Build each idea out into a full brief (problem, target user, wedge, incumbents with cited review quotes, MVP, risks). The wedge must trace to a real quote or it is flagged unproven.";
 const $ = id => document.getElementById(id);
 let poll = null;
 const TERMINAL = new Set(["done","error","cancelled","reported","interrupted"]);
@@ -347,6 +385,14 @@ function fmtWhen(s){
   if(!s) return "-";
   const d = new Date(s);
   return isNaN(d) ? s : d.toLocaleString();
+}
+// Table-width-friendly timestamp: drops seconds. Full precision stays in the cell's title.
+function fmtWhenShort(s){
+  if(!s) return "-";
+  const d = new Date(s);
+  if(isNaN(d)) return s;
+  return d.toLocaleString(undefined,{year:"numeric",month:"numeric",day:"numeric",
+                                     hour:"numeric",minute:"2-digit"});
 }
 function perMin(count, createdAt){
   if(!createdAt) return "0";
@@ -578,11 +624,11 @@ function renderRuns(){
   const rows=RUNS;
   $("runs").innerHTML=rows.length ? rows.map(r=>`<tr>
     <td class="dim"><code>${esc(r.job_id)}</code></td>
-    <td title="${esc(r.seed_url)}">${esc(shortSeed(r.seed_url))}</td>
+    <td class="seed" title="${esc(r.seed_url)}">${esc(shortSeed(r.seed_url))}</td>
     <td><span class="badge ${esc(r.status)}">${esc(r.status)}</span></td>
-    <td class="dim">${esc(fmtWhen(r.updated_at || r.created_at))}</td>
-    <td class="dim">${esc(`${r.doc_count || 0} posts / ${r.pain_count || 0} pains / ${r.cluster_count || 0} themes / ${r.idea_count || 0} ideas`)}<br><span title="Exact extractor model">${esc(extractorModelText(r))}</span></td>
-    <td style="white-space:nowrap">
+    <td class="dim" title="${esc(fmtWhen(r.updated_at || r.created_at))}">${esc(fmtWhenShort(r.updated_at || r.created_at))}</td>
+    <td class="dim wrap">${esc(`${r.doc_count || 0} posts / ${r.pain_count || 0} pains / ${r.cluster_count || 0} themes / ${r.idea_count || 0} ideas`)}<br><span title="Exact extractor model">${esc(extractorModelText(r))}</span></td>
+    <td class="rowact">
       <button class="secondary" data-run="${esc(r.job_id)}">Open</button>
       <button class="secondary warn" data-del="${esc(r.job_id)}" data-seed="${esc(shortSeed(r.seed_url))}" data-status="${esc(r.status)}">Delete</button>
     </td>
@@ -643,7 +689,7 @@ function scoreBreakdownHtml(r){
   const b = r.rank_breakdown || {};
   const ev = r.scoring_evidence || {};
   const rec = ev.recurrence || {};
-  const formula = `${n(b.demand ?? r.demand_score)} x ${n(b.persistence ?? r.persistence_score)} / (1 + ${n(b.saturation ?? r.saturation_score)}) x ${n(b.solvable_weight ?? r.solvable_weight ?? 1)}`;
+  const formula = `${n(b.demand ?? r.demand_score)} x ${n(b.persistence ?? r.persistence_score)} x ${n(b.solvable_weight ?? r.solvable_weight ?? 1)}`;
   const signals = dim => ((ev[dim] && ev[dim].signals) || []).slice(0,5).join(", ") || "none";
   return `<details class="scorebits"><summary>score breakdown</summary>
     <div><code>${esc(formula)}</code></div>
@@ -652,6 +698,7 @@ function scoreBreakdownHtml(r){
     <div>WTP ${n(r.willingness_to_pay)} (${esc(signals("willingness_to_pay"))})</div>
     <div>Reach ${n(r.reachability)} (${esc(signals("reachability"))})</div>
     <div>Recurrence ${n(r.recurrence_score)} (${esc(rec.distinct_sources ?? "-")} sources / ${esc(rec.workaround_count ?? "-")} workarounds)</div>
+    <div>Saturation ${n(b.saturation_display_only ?? r.saturation_score)} (display only)</div>
   </details>`;
 }
 async function loadRankings(job, runState=null){
@@ -683,20 +730,50 @@ function reviewsHtml(list){
   return `<details class="revs"><summary>${list.length} × 1–2★ complaints</summary><ul>${items}</ul></details>`;
 }
 function compHtml(list, revByComp){
-  if(!list || !list.length) return "";
+  // An empty competitor list is a FINDING (nobody serves this pain, or discovery failed),
+  // not a missing feature - say so rather than rendering nothing.
+  if(!list || !list.length)
+    return `<div class="comps dim">No existing competitors found for this idea.</div>`;
   const items = list.map(c=>{
     const name = c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name);
     const note = c.note ? ` <span class="dim">— ${esc(c.note)}</span>` : "";
-    const dom = c.review_domain ? ` <span class="dim">[${esc(c.review_domain)}]</span>` : "";
-    return `<li>${name}${note}${dom}${reviewsHtml(revByComp[c.id])}</li>`;
+    const weak = c.weakness ? `<br><span class="gap">gap: ${esc(c.weakness)}</span>` : "";
+    return `<li>${name}${note}${weak}${reviewsHtml(revByComp[c.id])}</li>`;
   }).join("");
-  return `<div class="comps"><b>Competitors:</b><ul>${items}</ul></div>`;
+  return `<div class="comps"><b>Competitors (${list.length}):</b><ul>${items}</ul></div>`;
+}
+function briefHtml(b){
+  if(!b) return "";
+  const sec = (label, body) => body ? `<div class="bsec"><b>${label}</b><p>${body}</p></div>` : "";
+  const list = (label, arr) => (arr && arr.length)
+    ? `<div class="bsec"><b>${label}</b><ul>${arr.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
+  // A wedge with no surviving review quote is a hypothesis. Label it, so an unproven guess
+  // is never mistaken for a researched finding.
+  const badge = b.has_review_evidence
+    ? `<span class="eb ok">${b.review_quote_count} cited review${b.review_quote_count===1?"":"s"}</span>`
+    : `<span class="eb warn">unproven — no review evidence</span>`;
+  const inc = (b.incumbents||[]).map(x=>{
+    const q = x.quote
+      ? `<blockquote>${x.rating?`<span class="star">${"★".repeat(x.rating)}</span> `:""}${esc(x.quote)}${
+          x.source_url?` <a href="${esc(x.source_url)}" target="_blank" rel="noopener">source</a>`:""}</blockquote>`
+      : "";
+    return `<li><b>${esc(x.name)}</b>${x.fails_at?` — ${esc(x.fails_at)}`:""}${q}</li>`;
+  }).join("");
+  return `<div class="brief">
+    ${sec("Problem", esc(b.problem))}
+    ${sec("Target user", esc(b.target_user))}
+    ${sec("Wedge " + badge, esc(b.wedge))}
+    ${inc ? `<div class="bsec"><b>Where incumbents fail</b><ul>${inc}</ul></div>` : ""}
+    ${list("MVP", b.mvp)}
+    ${list("Risks", b.risks)}
+  </div>`;
 }
 async function loadIdeas(job, runState=null){
-  const [rows, comps, revs] = await Promise.all([
+  const [rows, comps, revs, briefs] = await Promise.all([
     (await fetch(`/api/run/${job}/ideas`)).json(),
     (await fetch(`/api/run/${job}/competitors`)).json(),
     (await fetch(`/api/run/${job}/reviews`)).json(),
+    (await fetch(`/api/run/${job}/briefs`)).json(),
   ]);
   $("ideasCard").style.display="block";
   if(!rows.length){
@@ -704,14 +781,13 @@ async function loadIdeas(job, runState=null){
     $("ideas").innerHTML = `<div class="dim">${esc(msg || "No ideas were generated for this run.")}</div>`;
     return;
   }
-  const byCluster = {}, revByComp = {};
+  const byCluster = {}, revByComp = {}, briefByIdea = {};
   (comps||[]).forEach(c=>{ (byCluster[c.cluster_id] ||= []).push(c); });
   (revs||[]).forEach(r=>{ (revByComp[r.competitor_id] ||= []).push(r); });
-  $("ideasCard").style.display="block";
+  (briefs||[]).forEach(b=>{ briefByIdea[b.idea_id]=b; });
   $("ideas").innerHTML=rows.map(i=>`<div class="idea">
     <h3>${esc(i.title)}</h3><p>${esc(i.pitch)}</p>
-    <div class="test"><b>Kill test:</b> ${esc(i.kill_test)}<br>
-    <b>Metric:</b> ${esc(i.metric)}<br><b>Threshold:</b> ${esc(i.threshold)}</div>
+    ${briefHtml(briefByIdea[i.id])}
     ${compHtml(byCluster[i.cluster_id], revByComp)}
     ${i.evidence_permalink ? `<p><a href="${esc(i.evidence_permalink)}" target="_blank" rel="noopener">evidence</a></p>` : ""}
   </div>`).join("");

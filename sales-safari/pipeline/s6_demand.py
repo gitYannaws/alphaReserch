@@ -17,6 +17,13 @@ REACHABILITY_TERMS = {
     "forum", "community", "makerspace", "shop", "etsy", "client",
     "customer", "seller", "business", "hobbyist", "beginner", "class",
 }
+# Persistence: does the pain keep recurring despite attempts? A pain signal about the pain
+# itself (not competitors), so it lives here in demand, not in the competition stage. Still a
+# keyword proxy for the real test (complaint dates vs incumbent launch) - see CLAUDE.md 8.3.
+PERSISTENCE_TERMS = {
+    "still", "again", "keeps", "keep having", "after update", "workaround",
+    "manual", "every time", "always", "still can't", "still cannot",
+}
 
 
 def _texts(cluster: dict):
@@ -137,6 +144,8 @@ def score_cluster(cluster: dict, weights: dict) -> dict:
     if evidence_count:
         reachability = min(10.0, reachability + (post_level / evidence_count) * 2.0)
     recurrence_score, recurrence_evidence = _recurrence(cluster)
+    persistence_hits = _term_hits(text, PERSISTENCE_TERMS)
+    persistence_score = round(min(10.0, 3.0 + len(persistence_hits) * 1.5), 2)
 
     parts = {
         "pain_intensity": round(pain_intensity, 2),
@@ -147,6 +156,7 @@ def score_cluster(cluster: dict, weights: dict) -> dict:
     }
     return {
         **parts,
+        "persistence_score": persistence_score,  # rank multiplier, NOT in the demand average
         "demand_score": _weighted_score(parts, weights),
         "evidence_count": evidence_count,
         "distinct_authors": distinct_authors,
@@ -170,6 +180,7 @@ def score_cluster(cluster: dict, weights: dict) -> dict:
                 "post_level_evidence": post_level,
             },
             "recurrence": recurrence_evidence,
+            "persistence": {"signals": persistence_hits},
         },
     }
 
