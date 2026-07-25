@@ -78,7 +78,8 @@ pipeline/
     base.py                    # Collector interface + Document dataclass
     discourse_collector.py     # Discourse JSON (free, structured, per-post author); delta refresh skips topics with no new posts (known_thread_stats)
     firecrawl_collector.py     # generic forum fallback (Firecrawl REST, thread-level)
-    playwright_collector.py    # open JS-rendered pages only; no evasion (infinite-scroll aware)
+    playwright_collector.py    # open JS-rendered pages only; no evasion (infinite-scroll aware); strips site chrome + quotes, dedupes by rel=canonical, and emits POST-level docs when the rendered DOM is XenForo
+    xenforo_collector.py       # static XenForo over plain requests (browser UA, no headless); `parse_thread_posts`/`is_xenforo_html`/`base_thread_url` are reused by the renderer
     fallback_collector.py      # approved firecrawl + playwright auto fallback
     reddit_collector.py        # Reddit LIVE via Playwright + old.reddit HTML, per-comment authored (.json is 403-blocked)
     arcticshift_collector.py   # Reddit HISTORICAL via Arctic Shift archive (API or local .zst dumps); full history, scores, zero reddit.com load
@@ -132,6 +133,14 @@ webapp/
 - **Extractor fallback.** Try Claude first; fall back to Codex only for configured quota/rate-limit markers such as API 429. Codex output still goes through the exact-span gate.
 - **Distinct authors, not post count (stage 5).** One loud user is not a market.
 - **Source granularity matters.** Discourse is post-level with per-post authors; Firecrawl is thread-level unless it can prove per-post authors. Later scores should discount weak author evidence.
+- **Render to reach a board, then parse it properly.** A rendered page is not an excuse for a
+  thread blob. `playwright_collector` runs the XenForo post parser over the DOM it loaded, so a
+  board that gates plain requests behind a JS challenge still yields per-post authors. Rendering
+  is where the line sits: the site's own JS runs in a real browser, but no collector may
+  reimplement a proof-of-work/CAPTCHA challenge in Python — that is evasion, not collection.
+- **Dedupe by `rel=canonical`, not by URL string.** XenForo serves one thread at `/threads/x.9`,
+  `/x.9/latest` and `/x.9/page-2`. Run `e81aed813e0f` stored 47 documents for ~25 threads because
+  each alias looked new; content-hash dedupe is the second net behind canonical.
 - **Firecrawl is opt-in.** Do not use Firecrawl as an implicit fallback from the website. A run must explicitly approve Firecrawl, or config/CLI must set `collection.fallback` to `firecrawl` or `auto`.
 - **Competition is NOT in demand score, and NOT in rank either.** Demand (stage 6) and
   competition (stage 9b) stay separate. Saturation used to divide rank as `/(1+saturation)`;

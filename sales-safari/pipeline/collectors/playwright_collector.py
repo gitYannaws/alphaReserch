@@ -6,11 +6,13 @@ This is a rendering fallback, not an evasion layer:
 - no CAPTCHA solving
 - slows/retries on 403/429, login walls, CAPTCHA, and bot-wall text, then stops
 """
+import hashlib
 import re
 from typing import Iterator, List
 from urllib.parse import urljoin, urlparse
 
 from .base import Collector, Document
+from .xenforo_collector import base_thread_url, is_xenforo_html, parse_thread_posts
 from pipeline.domain_policy import find_unsupported_domain, format_unsupported_domain_error
 from pipeline.rate_limit import AdaptiveRateLimiter
 
@@ -27,9 +29,38 @@ BLOCKED_TEXT = (
 
 _WS = re.compile(r"\s+")
 
+# Site chrome that innerText would otherwise prepend to every single document
+# ("Forums Members Rules What's new Log in Register Search New posts ..."), plus quoted
+# text, which duplicates another post's words into this one's evidence.
+BOILERPLATE_SELECTOR = (
+    "script, style, noscript, nav, header, footer, aside, form, "
+    "blockquote, [role=navigation], [role=banner], [role=contentinfo], [role=search], "
+    "[aria-hidden=true]"
+)
+
+_STRIP_JS = """
+(sel) => {
+  const root = document.body ? document.body.cloneNode(true) : null;
+  if (!root) return '';
+  root.querySelectorAll(sel).forEach((el) => el.remove());
+  return root.innerText || '';
+}
+"""
+
+_CANONICAL_JS = """
+() => {
+  const l = document.querySelector('link[rel="canonical"]');
+  return l ? l.href : '';
+}
+"""
+
 
 class PlaywrightCollectorError(RuntimeError):
     pass
+
+
+def _text_key(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
 
 
 def _host(url: str) -> str:
@@ -48,6 +79,7 @@ class PlaywrightCollector(Collector):
                  thread_patterns=None, max_pages: int = 25, min_delay_seconds: float = 3.0,
                  max_delay_seconds: float = 8.0, timeout_ms: int = 30000,
                  headless: bool = True, allowed_domains=None, unsupported_domains=None,
+                 max_thread_pages: int = 10, post_level: bool = True,
                  wait_after_load_ms: int = 1200, scroll_steps: int = 0,
                  scroll_delay_ms: int = 500, max_scrolls: int = 40,
                  scroll_settle_rounds: int = 2, rl_backoff: float = 1.6,
@@ -56,6 +88,10 @@ class PlaywrightCollector(Collector):
         self.thread_patterns = thread_patterns or ([thread_pattern] if thread_pattern else [])
         self.same_domain_only = same_domain_only
         self.max_pages = max_pages
+        self.max_thread_pages = max_thread_pages
+        # When the rendered DOM is recognizably post-structured, emit per-post documents
+        # instead of one thread blob. Set False to force the old thread-level behaviour.
+        self.post_level = post_level
         self.min_delay_seconds = min_delay_seconds
         self.max_delay_seconds = max_delay_seconds
         self.timeout_ms = timeout_ms
@@ -167,21 +203,67 @@ class PlaywrightCollector(Collector):
             out.append(url)
         return out
 
-    def _document(self, page, url: str) -> Document:
-        title = page.title() or url
-        text = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
-        text = _WS.sub(" ", text).strip()
+    def _canonical(self, page, url: str) -> str:
+        """The page's own declared canonical URL, else the requested one.
+
+        Web-standard, platform-agnostic dedupe key: XenForo serves the same thread page at
+        /threads/x.9700, /threads/x.9700/latest and /threads/x.9700/page-2, and without this
+        each alias lands in the corpus as its own document.
+        """
+        try:
+            href = page.evaluate(_CANONICAL_JS) or ""
+        except Exception:
+            href = ""
+        href = _norm_url(href) if href else ""
+        if not href or (self.same_domain_only and _host(href) != _host(url)):
+            return _norm_url(url)
+        return href
+
+    def _page_text(self, page, url: str) -> str:
+        text = _WS.sub(" ", page.evaluate(_STRIP_JS, BOILERPLATE_SELECTOR) or "").strip()
         if not text:
             raise PlaywrightCollectorError(f"no readable text for {url}")
+        return text
+
+    def _document(self, page, url: str) -> Document:
         return Document(
             source_type=self.source_type,
             source_url=url,
             permalink=url,
-            title=title,
-            raw_markdown=text,
+            title=page.title() or url,
+            raw_markdown=self._page_text(page, url),
             source_granularity="thread",
             thread_url=url,
         )
+
+    def _xenforo_posts(self, page, url: str) -> List[Document]:
+        """Post-level docs from a rendered XenForo thread, walking its pagination.
+
+        Rendering is the only way onto boards that gate plain requests behind a JS
+        challenge; once the page is in the DOM the static XenForo parser gives back the
+        per-post authors that stage 5's distinct-author count depends on.
+        """
+        base = base_thread_url(url)
+        title = (page.title() or "").split("|")[0].strip() or base
+        docs, seen_posts = [], set()
+        page_no = 1
+        while page_no <= self.max_thread_pages:
+            if page_no > 1:
+                self._sleep()
+                self._goto(page, f"{base}/page-{page_no}")
+                self._scroll(page)
+            html = page.content()
+            found = parse_thread_posts(html, base, self.source_type, title)
+            fresh = [d for d in found if d.permalink not in seen_posts]
+            if not fresh:
+                break
+            for d in fresh:
+                seen_posts.add(d.permalink)
+                docs.append(d)
+            if f"/page-{page_no + 1}" not in html:
+                break
+            page_no += 1
+        return docs
 
     def collect(self, seed_url: str, limit: int) -> Iterator[Document]:
         self._check_allowed(seed_url)
@@ -216,17 +298,36 @@ class PlaywrightCollector(Collector):
                         )
 
                 saved = 0
+                seen_canonical, seen_text = set(), set()
                 for url in urls[:max_docs]:
                     self._sleep()
                     self._goto(page, url)
                     self._scroll(page)
+                    canonical = self._canonical(page, url)
+                    # Both keys: the declared canonical, and the thread root it belongs to.
+                    # /threads/x.9700/latest and /threads/x.9700/page-2 declare different
+                    # canonicals but are the same thread, and the post walk below covers
+                    # every page of it in one visit.
+                    keys = {canonical, base_thread_url(canonical), base_thread_url(url)}
+                    if keys & seen_canonical:
+                        print(f"  skip {url}: duplicate of {canonical}")
+                        continue
+                    seen_canonical |= keys
                     try:
-                        doc = self._document(page, url)
+                        if self.post_level and is_xenforo_html(page.content()):
+                            docs = self._xenforo_posts(page, url)
+                        else:
+                            docs = [self._document(page, canonical)]
                     except PlaywrightCollectorError as e:
                         print(f"  skip {url}: {e}")
                         continue
-                    saved += 1
-                    yield doc
+                    for doc in docs:
+                        key = _text_key(doc.raw_markdown)
+                        if key in seen_text:
+                            continue
+                        seen_text.add(key)
+                        saved += 1
+                        yield doc
                 if saved == 0:
                     raise PlaywrightCollectorError(
                         f"found {len(urls[:max_docs])} thread links but saved 0 readable pages"

@@ -22,6 +22,10 @@ collection:
   thread_url_pattern: "/t/"     # Discourse thread path; adjust per forum
   thread_url_patterns: ["/t/", "/threads/", "/comments/"]  # Common topic/thread URL markers
   same_domain_only: true
+  # Pages to walk WITHIN one thread before moving on. Both forum collectors stop early
+  # when a thread has no next page, so this is only a runaway guard -- keep it high
+  # enough that a long thread is never truncated mid-way (50 posts/page x 100 = 5k posts).
+  max_thread_pages: 100
   fallback: xenforo             # none | firecrawl | playwright | auto | xenforo | render
   # Adaptive rate-limit control for unknown rendered/static forums (XenForo + Playwright).
   # Each 403/429 multiplies the inter-request delay by `backoff` (capped at

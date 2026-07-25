@@ -25,12 +25,16 @@ UA = {
 }
 
 _WS = re.compile(r"\s+")
-_POST = re.compile(
-    r'data-author="([^"]*)".*?data-content="post-(\d+)".*?<div class="bbWrapper">(.*?)</div>\s*</div>',
-    re.S,
+# Pair each post's author with its id. The negative lookahead stops the scan from running
+# past the next post's data-author and mis-attributing the id.
+_POST_HEAD = re.compile(
+    r'data-author="([^"]*)"(?:(?!data-author=).)*?data-content="post-(\d+)"', re.S
 )
+_BBWRAPPER = re.compile(r'<div class="bbWrapper"[^>]*>')
+_DIV_TAG = re.compile(r"</?div\b", re.I)
 _TITLE = re.compile(r"<title>(.*?)</title>", re.S)
 _TIME = re.compile(r'<time[^>]*datetime="([^"]+)"')
+_XF_MARKERS = ('data-xf-init', 'xf-init', 'id="xf"', 'xenforo')
 
 
 class XenforoCollectorError(RuntimeError):
@@ -45,6 +49,71 @@ def _clean(html: str) -> str:
     html = re.sub(r"<blockquote.*?</blockquote>", " ", html, flags=re.S)   # drop quoted text
     html = re.sub(r"<script.*?</script>", " ", html, flags=re.S)
     return unescape(_WS.sub(" ", re.sub(r"<[^>]+>", " ", html))).strip()
+
+
+def _bbwrapper_body(html: str, from_index: int) -> str:
+    """Inner HTML of the first bbWrapper at/after from_index, matching <div> depth.
+
+    A plain non-greedy regex cannot do this: a quoted post nests several divs inside the
+    wrapper, so `(.*?)</div></div>` terminates inside the quote block. That silently
+    truncated every reply-with-quote to just the quote it was answering, losing the
+    author's own words and leaving an unclosed <blockquote> that _clean could not strip.
+    """
+    m = _BBWRAPPER.search(html, from_index)
+    if not m:
+        return ""
+    start = m.end()
+    depth = 1
+    for tag in _DIV_TAG.finditer(html, start):
+        depth += -1 if tag.group(0).startswith("</") else 1
+        if depth == 0:
+            return html[start:tag.start()]
+    return html[start:]          # unterminated markup: keep what we have
+
+
+def base_thread_url(url: str) -> str:
+    """Collapse /threads/slug.123/page-2 , /post-9 , /latest , /unread to the base thread URL."""
+    m = re.match(r"^(.*?/threads/[^/]+)(?:/.*)?$", url)
+    return m.group(1) if m else url
+
+
+def is_xenforo_html(html: str) -> bool:
+    """Marker test on already-fetched HTML, so a renderer can classify what it loaded."""
+    low = (html or "").lower()
+    return any(m in low for m in _XF_MARKERS)
+
+
+def parse_thread_posts(html: str, base_url: str, source_type: str = "forum",
+                       title: str | None = None) -> List[Document]:
+    """Post-level Documents out of one XenForo thread page.
+
+    Split out of the collector so any HTML source can reuse it -- notably the Playwright
+    renderer, which is the only way onto boards that gate plain requests behind a JS
+    challenge. Returns [] when the HTML holds no recognizable posts.
+    """
+    base = base_thread_url(base_url)
+    if title is None:
+        tm = _TITLE.search(html)
+        title = unescape(tm.group(1).split("|")[0].strip()) if tm else base
+    times = _TIME.findall(html)
+    out: List[Document] = []
+    for i, head in enumerate(_POST_HEAD.finditer(html)):
+        author, post_id = head.group(1), head.group(2)
+        text = _clean(_bbwrapper_body(html, head.end()))
+        if len(text) < 3:
+            continue
+        out.append(Document(
+            source_type=source_type,
+            source_url=f"{base}#post-{post_id}",
+            permalink=f"{base}#post-{post_id}",
+            title=title,
+            raw_markdown=text,
+            source_granularity="post",
+            author=unescape(author) or None,
+            thread_url=base,
+            created_at=times[i] if i < len(times) else None,
+        ))
+    return out
 
 
 class XenforoCollector(Collector):
@@ -83,8 +152,7 @@ class XenforoCollector(Collector):
             return False
         if r.status_code != 200:
             return False
-        t = r.text.lower()
-        return any(m in t for m in ('data-xf-init', 'xf-init', 'id="xf"', 'xenforo'))
+        return is_xenforo_html(r.text)
 
     def _get(self, url: str) -> str:
         for attempt in range(self.limiter.retries + 1):
@@ -104,11 +172,7 @@ class XenforoCollector(Collector):
     def _is_thread(self, url: str) -> bool:
         return any(p in url for p in self.thread_patterns)
 
-    @staticmethod
-    def _base_thread(url: str) -> str:
-        # Collapse /threads/slug.123/page-2 , /post-9 , /unread ... to the base thread URL.
-        m = re.match(r"^(.*?/threads/[^/]+)(?:/.*)?$", url)
-        return m.group(1) if m else url
+    _base_thread = staticmethod(base_thread_url)
 
     def _thread_links(self, html: str, seed_url: str) -> List[str]:
         seed_host = _host(seed_url)
@@ -139,25 +203,10 @@ class XenforoCollector(Collector):
             if title is None:
                 tm = _TITLE.search(html)
                 title = unescape(tm.group(1).split("|")[0].strip()) if tm else base
-            times = _TIME.findall(html)
-            posts = _POST.findall(html)
-            if not posts:
+            docs = parse_thread_posts(html, base, self.source_type, title)
+            if not docs:
                 break
-            for i, (author, post_id, body) in enumerate(posts):
-                text = _clean(body)
-                if len(text) < 3:
-                    continue
-                yield Document(
-                    source_type=self.source_type,
-                    source_url=f"{base}#post-{post_id}",
-                    permalink=f"{base}#post-{post_id}",
-                    title=title,
-                    raw_markdown=text,
-                    source_granularity="post",
-                    author=unescape(author) or None,
-                    thread_url=base,
-                    created_at=times[i] if i < len(times) else None,
-                )
+            yield from docs
             # next page only if a pageNav "next" link exists
             if f"/page-{page + 1}" not in html:
                 break
