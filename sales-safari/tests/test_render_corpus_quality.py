@@ -96,6 +96,32 @@ class XenforoHtmlParseTests(unittest.TestCase):
                          "Rent there ate my whole salary and the agency wanted three "
                          "months up front")
 
+    def test_nested_quote_leaves_no_expand_artifact(self):
+        # 46 posts of run e81aed813e0f stored as "Click to expand... <the real reply>":
+        # the non-greedy blockquote strip stopped at the INNER close of a nested quote.
+        html = """
+<html data-xf-init="x"><head><title>T | B</title></head><body>
+<article data-author="Cee" class="message">
+  <time datetime="2026-01-01T00:00:00+0000"></time>
+  <div class="message-inner" data-content="post-9">
+    <div class="bbWrapper"><blockquote class="bbCodeBlock bbCodeBlock--quote">
+      <div class="bbCodeBlock-title"><a>Bee said:</a></div>
+      <div class="bbCodeBlock-content">
+        <blockquote class="bbCodeBlock bbCodeBlock--quote">
+          <div class="bbCodeBlock-title"><a>Ay said:</a></div>
+          <div class="bbCodeBlock-content">original point</div>
+        </blockquote>
+        Bee's answer to Ay
+      </div>
+      <div class="bbCodeBlock-expandLink js-expandLink"><a role="button">Click to expand...</a></div>
+    </blockquote>i hate them so much</div>
+  </div>
+</article></body></html>
+"""
+        docs = parse_thread_posts(html, THREAD)
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0].raw_markdown, "i hate them so much")
+
     def test_returns_empty_on_unrecognized_html(self):
         self.assertEqual(parse_thread_posts("<html><body>no posts</body></html>", THREAD), [])
 

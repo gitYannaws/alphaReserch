@@ -45,9 +45,33 @@ def _host(url: str) -> str:
     return urlparse(url).netloc.lower()
 
 
+def _strip_balanced(html: str, tag: str) -> str:
+    """Remove every <tag>...</tag> region, honouring nesting.
+
+    `<blockquote.*?</blockquote>` is non-greedy, so on a nested quote (A quotes B, who
+    quoted C) it stops at the INNER close and leaves the outer quote's tail behind --
+    which is how 46 posts ended up stored as "Click to expand... <the actual reply>".
+    """
+    pat = re.compile(rf"</?{tag}\b", re.I)
+    out, depth, pos = [], 0, 0
+    for m in pat.finditer(html):
+        if m.group(0).startswith("</"):
+            if depth > 0:
+                depth -= 1
+                if depth == 0:
+                    end = html.find(">", m.end())
+                    pos = end + 1 if end != -1 else m.end()
+        else:
+            if depth == 0:
+                out.append(html[pos:m.start()])
+            depth += 1
+    out.append(html[pos:] if depth == 0 else "")
+    return " ".join(out)
+
+
 def _clean(html: str) -> str:
-    html = re.sub(r"<blockquote.*?</blockquote>", " ", html, flags=re.S)   # drop quoted text
-    html = re.sub(r"<script.*?</script>", " ", html, flags=re.S)
+    html = _strip_balanced(html, "blockquote")        # drop quoted text, nesting and all
+    html = _strip_balanced(html, "script")
     return unescape(_WS.sub(" ", re.sub(r"<[^>]+>", " ", html))).strip()
 
 
