@@ -81,3 +81,32 @@ class PickCollectorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlaywrightCorpusWiringTests(unittest.TestCase):
+    """A corpus backfill on the render path must see the whole board and be resumable."""
+
+    CFG = {"collection": {"fallback": "playwright", "max_threads": 100,
+                          "corpus_max_threads": 10000, "max_listing_pages": 300,
+                          "thread_url_patterns": ["/threads/"]}}
+    KNOWN = {"https://geomax.me/threads/map-of-where-id-live.9700"}
+
+    def test_backfill_uses_corpus_cap_and_skips_known_threads(self):
+        collector, kind = pick_collector(
+            "https://geomax.me/forums/geomax.2/", self.CFG,
+            known_thread_urls=self.KNOWN, corpus_mode="backfill")
+        self.assertEqual(kind, "playwright")
+        self.assertEqual(collector.max_pages, 10000)      # not re-capped at max_threads
+        self.assertEqual(collector.max_listing_pages, 300)
+        self.assertEqual(collector.skip_thread_urls, self.KNOWN)
+
+    def test_refresh_revisits_known_threads_for_new_posts(self):
+        collector, _ = pick_collector(
+            "https://geomax.me/forums/geomax.2/", self.CFG,
+            known_thread_urls=self.KNOWN, corpus_mode="refresh")
+        self.assertEqual(collector.skip_thread_urls, set())
+
+    def test_bounded_run_keeps_the_max_threads_cap(self):
+        collector, _ = pick_collector("https://geomax.me/forums/geomax.2/", self.CFG)
+        self.assertEqual(collector.max_pages, 100)
+        self.assertEqual(collector.skip_thread_urls, set())

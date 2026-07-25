@@ -54,6 +54,16 @@ _CANONICAL_JS = """
 }
 """
 
+# rel="next" is the standard forward-pagination signal and is what forum software emits
+# in <head> for a thread listing (XenForo: <link rel="next" href="/forums/x.2/page-2">).
+# Following it is how thread discovery reaches past the first listing page.
+_NEXT_JS = """
+() => {
+  const el = document.querySelector('link[rel="next"], a[rel="next"]');
+  return el ? el.href : '';
+}
+"""
+
 
 class PlaywrightCollectorError(RuntimeError):
     pass
@@ -79,7 +89,8 @@ class PlaywrightCollector(Collector):
                  thread_patterns=None, max_pages: int = 25, min_delay_seconds: float = 3.0,
                  max_delay_seconds: float = 8.0, timeout_ms: int = 30000,
                  headless: bool = True, allowed_domains=None, unsupported_domains=None,
-                 max_thread_pages: int = 10, post_level: bool = True,
+                 max_thread_pages: int = 10, max_listing_pages: int = 1,
+                 post_level: bool = True, skip_thread_urls=None,
                  wait_after_load_ms: int = 1200, scroll_steps: int = 0,
                  scroll_delay_ms: int = 500, max_scrolls: int = 40,
                  scroll_settle_rounds: int = 2, rl_backoff: float = 1.6,
@@ -89,6 +100,17 @@ class PlaywrightCollector(Collector):
         self.same_domain_only = same_domain_only
         self.max_pages = max_pages
         self.max_thread_pages = max_thread_pages
+        # Listing pages of THREAD LINKS to walk before collecting. 1 = seed page only,
+        # which is the historical behaviour. A big board is mostly unreachable at 1, but
+        # raising it multiplies the whole run: threads-per-page x pages-per-thread fetches.
+        self.max_listing_pages = max_listing_pages
+        # Thread roots already held for this corpus. A deep backfill is measured in hours,
+        # so a runner that dies partway must not re-walk what it already collected: the
+        # resume runner re-enters stage 1 while progress is short of the cap, and these
+        # let it pick up where it stopped. Left None on refresh runs, which need to
+        # revisit known threads to capture posts added since.
+        self.skip_thread_urls = {base_thread_url(_norm_url(u))
+                                 for u in (skip_thread_urls or ())}
         # When the rendered DOM is recognizably post-structured, emit per-post documents
         # instead of one thread blob. Set False to force the old thread-level behaviour.
         self.post_level = post_level
@@ -265,6 +287,46 @@ class PlaywrightCollector(Collector):
             page_no += 1
         return docs
 
+    def _listing_thread_urls(self, page, seed_url: str, max_docs: int) -> List[str]:
+        """Thread URLs from the listing, following rel="next" across listing pages.
+
+        Reading only the seed page caps a run at whatever that one page links -- 21
+        threads of the ~5300 on the board that run e81aed813e0f was pointed at. The
+        caller has already loaded and scrolled the seed page.
+        """
+        urls, seen, skipped = [], set(), 0
+        listing = _norm_url(seed_url)
+        for page_no in range(1, max(1, self.max_listing_pages) + 1):
+            if page_no > 1:
+                self._sleep()
+                self._goto(page, listing)
+                self._scroll(page)
+            for url in self._links(page, listing):
+                # Store the thread root: a listing links the same thread several ways
+                # (/latest, /post-N, /unread) and each alias would cost a fetch.
+                root = base_thread_url(url)
+                if root in seen:
+                    continue
+                seen.add(root)
+                if root in self.skip_thread_urls:
+                    skipped += 1
+                    continue
+                urls.append(root)
+                if len(urls) >= max_docs:
+                    return urls
+            nxt = page.evaluate(_NEXT_JS) or ""
+            nxt = _norm_url(urljoin(listing, nxt)) if nxt else ""
+            if not nxt or nxt == listing:
+                break
+            if self.same_domain_only and _host(nxt) != _host(seed_url):
+                break
+            listing = nxt
+            print(f"  listing page {page_no + 1}: {len(urls)} threads queued"
+                  + (f", {skipped} already collected" if skipped else ""))
+        if skipped:
+            print(f"  skipping {skipped} threads already in the corpus")
+        return urls
+
     def collect(self, seed_url: str, limit: int) -> Iterator[Document]:
         self._check_allowed(seed_url)
         try:
@@ -290,7 +352,7 @@ class PlaywrightCollector(Collector):
                 else:
                     self._goto(page, seed_url)
                     self._scroll(page)
-                    urls = self._links(page, seed_url)[:max_docs]
+                    urls = self._listing_thread_urls(page, seed_url, max_docs)
                     if not urls:
                         raise PlaywrightCollectorError(
                             "no thread links found on "

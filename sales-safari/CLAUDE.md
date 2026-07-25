@@ -141,6 +141,18 @@ webapp/
 - **Dedupe by `rel=canonical`, not by URL string.** XenForo serves one thread at `/threads/x.9`,
   `/x.9/latest` and `/x.9/page-2`. Run `e81aed813e0f` stored 47 documents for ~25 threads because
   each alias looked new; content-hash dedupe is the second net behind canonical.
+- **Walk BOTH paginations, and state the ceiling.** Thread discovery follows the listing's
+  `rel="next"` (`collection.max_listing_pages`) and each thread's own pages
+  (`collection.max_thread_pages`). Reading only the seed page reaches whatever that page links:
+  on `geomax.me/forums/geomax.2` that is 21 threads of ~5,300 across 254 listing pages, i.e.
+  0.4% of the board. Depth is the operator's call because cost is
+  listing-pages x threads-per-page x pages-per-thread fetches (~29s each on a challenged
+  board) -- never quietly collect a slice and report it as the source.
+- **A deep backfill must be resumable.** `corpus_mode` `backfill`/`historical` passes the
+  corpus's known thread roots to the collector as `skip_thread_urls`, so a runner that dies
+  at hour 30 of a 40-hour crawl picks up where it stopped (the resume runner re-enters stage 1
+  while progress is short of the cap). `refresh` deliberately passes none -- it must revisit
+  known threads to capture posts added since.
 - **Firecrawl is opt-in.** Do not use Firecrawl as an implicit fallback from the website. A run must explicitly approve Firecrawl, or config/CLI must set `collection.fallback` to `firecrawl` or `auto`.
 - **Competition is NOT in demand score, and NOT in rank either.** Demand (stage 6) and
   competition (stage 9b) stay separate. Saturation used to divide rank as `/(1+saturation)`;

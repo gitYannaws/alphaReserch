@@ -26,6 +26,12 @@ collection:
   # when a thread has no next page, so this is only a runaway guard -- keep it high
   # enough that a long thread is never truncated mid-way (50 posts/page x 100 = 5k posts).
   max_thread_pages: 100
+  # Listing pages of thread links to walk before collecting (render path). 1 = seed page
+  # only, which strands a big board: geomax.me/forums/geomax.2 lists ~21 threads per page
+  # across 254 pages, so page 1 alone reaches 0.4% of it. Discovery stops early when the
+  # listing runs out of rel="next", so this is a ceiling, not a fixed cost -- but every
+  # extra page multiplies the run by threads-per-page x pages-per-thread fetches.
+  max_listing_pages: 300
   fallback: xenforo             # none | firecrawl | playwright | auto | xenforo | render
   # Adaptive rate-limit control for unknown rendered/static forums (XenForo + Playwright).
   # Each 403/429 multiplies the inter-request delay by `backoff` (capped at

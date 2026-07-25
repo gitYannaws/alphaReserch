@@ -170,13 +170,22 @@ def pick_collector(seed: str, cfg: dict, known_thread_urls=None, corpus_mode: st
     def playwright():
         pw = coll.get("playwright", {})
         rl = coll.get("rate_limit", {})
+        # A corpus run's own cap is corpus_max_threads; max_threads would otherwise
+        # silently re-cap it at the bounded-run default and strand most of a board.
+        thread_cap = (coll.get("corpus_max_threads", 10000) if corpus_mode
+                      else coll.get("max_threads", 25))
+        # Refresh has to revisit known threads to see posts added since; a backfill
+        # skips them so an interrupted deep crawl resumes instead of starting over.
+        skip = known_thread_urls if corpus_mode in {"backfill", "historical"} else None
         return PlaywrightCollector(
             thread_pattern=coll.get("thread_url_pattern", "/t/"),
             thread_patterns=coll.get("thread_url_patterns"),
             same_domain_only=coll.get("same_domain_only", True),
-            max_pages=coll.get("max_threads", 25),
+            max_pages=thread_cap,
             max_thread_pages=coll.get("max_thread_pages", 10),
+            max_listing_pages=coll.get("max_listing_pages", 1),
             post_level=pw.get("post_level", True),
+            skip_thread_urls=skip,
             min_delay_seconds=pw.get("min_delay_seconds", 3),
             max_delay_seconds=pw.get("max_delay_seconds", 8),
             timeout_ms=pw.get("timeout_ms", 30000),
