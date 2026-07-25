@@ -142,36 +142,52 @@ class ListingPaginationTests(unittest.TestCase):
         c._sleep = lambda: None
         return c
 
+    def _walk(self, max_listing_pages, max_docs=100, page=None, skip=None):
+        page = page or FakeListingPage(self.ORDER, self.PAGES)
+        c = self._collector(max_listing_pages)
+        if skip:
+            c.skip_thread_urls = skip
+        return list(c._iter_listing_threads(page, self.ORDER[0], max_docs)), page
+
     def test_one_page_is_the_old_seed_only_behaviour(self):
-        page = FakeListingPage(self.ORDER, self.PAGES)
-        urls = self._collector(1)._listing_thread_urls(page, self.ORDER[0], 100)
+        urls, page = self._walk(1)
         self.assertEqual(urls, ["https://x.me/threads/a.1", "https://x.me/threads/b.2"])
         self.assertEqual(page.visited, [self.ORDER[0]])       # never paginated
 
     def test_follows_rel_next_and_collapses_alias_links(self):
-        page = FakeListingPage(self.ORDER, self.PAGES)
-        urls = self._collector(3)._listing_thread_urls(page, self.ORDER[0], 100)
+        urls, page = self._walk(3)
         self.assertEqual(urls, [f"https://x.me/threads/{s}" for s in
                                 ("a.1", "b.2", "c.3", "d.4", "e.5")])
         self.assertEqual(page.visited, self.ORDER)
 
     def test_stops_when_rel_next_runs_out_before_the_cap(self):
-        page = FakeListingPage(self.ORDER, self.PAGES)
-        urls = self._collector(99)._listing_thread_urls(page, self.ORDER[0], 100)
+        urls, page = self._walk(99)
         self.assertEqual(len(urls), 5)
         self.assertEqual(page.visited, self.ORDER)
 
     def test_honors_max_docs_mid_page(self):
-        page = FakeListingPage(self.ORDER, self.PAGES)
-        urls = self._collector(3)._listing_thread_urls(page, self.ORDER[0], 3)
+        urls, _ = self._walk(3, max_docs=3)
         self.assertEqual(urls, [f"https://x.me/threads/{s}" for s in ("a.1", "b.2", "c.3")])
+
+    def test_is_lazy_so_collection_starts_before_discovery_finishes(self):
+        # Walking all 254 listings up front means ~an hour before the first document is
+        # stored, and discovery lost entirely if the runner dies partway.
+        page = FakeListingPage(self.ORDER, self.PAGES)
+        gen = self._collector(3)._iter_listing_threads(page, self.ORDER[0], 100)
+        self.assertEqual(next(gen), "https://x.me/threads/a.1")
+        self.assertEqual(page.visited, [self.ORDER[0]])       # page 2 not fetched yet
+        next(gen), next(gen)                                   # exhaust page 1, cross over
+        self.assertEqual(page.visited, self.ORDER[:2])
+
+    def test_max_docs_stops_before_fetching_another_listing_page(self):
+        page = FakeListingPage(self.ORDER, self.PAGES)
+        self._walk(3, max_docs=2, page=page)
+        self.assertEqual(page.visited, [self.ORDER[0]])
 
     def test_skips_thread_roots_already_in_the_corpus(self):
         # An interrupted deep backfill must resume, not re-walk 5000 threads.
-        c = self._collector(3)
-        c.skip_thread_urls = {"https://x.me/threads/a.1", "https://x.me/threads/c.3"}
-        page = FakeListingPage(self.ORDER, self.PAGES)
-        urls = c._listing_thread_urls(page, self.ORDER[0], 100)
+        urls, _ = self._walk(3, skip={"https://x.me/threads/a.1",
+                                      "https://x.me/threads/c.3"})
         self.assertEqual(urls, [f"https://x.me/threads/{s}" for s in ("b.2", "d.4", "e.5")])
 
     def test_skip_list_is_normalized_from_alias_urls(self):
@@ -185,7 +201,7 @@ class ListingPaginationTests(unittest.TestCase):
     def test_skips_offsite_next_link(self):
         order = ["https://x.me/forums/f.2", "https://evil.example/forums/f.2/page-2"]
         page = FakeListingPage(order, {order[0]: ["/threads/a.1"], order[1]: []})
-        urls = self._collector(5)._listing_thread_urls(page, order[0], 100)
+        urls = list(self._collector(5)._iter_listing_threads(page, order[0], 100))
         self.assertEqual(urls, ["https://x.me/threads/a.1"])
         self.assertEqual(page.visited, [order[0]])
 

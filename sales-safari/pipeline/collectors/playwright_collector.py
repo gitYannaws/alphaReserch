@@ -287,22 +287,27 @@ class PlaywrightCollector(Collector):
             page_no += 1
         return docs
 
-    def _listing_thread_urls(self, page, seed_url: str, max_docs: int) -> List[str]:
-        """Thread URLs from the listing, following rel="next" across listing pages.
+    def _iter_listing_threads(self, page, seed_url: str, max_docs: int) -> Iterator[str]:
+        """Thread roots from the listing, following rel="next" across listing pages.
 
         Reading only the seed page caps a run at whatever that one page links -- 21
-        threads of the ~5300 on the board that run e81aed813e0f was pointed at. The
-        caller has already loaded and scrolled the seed page.
+        threads of the ~5300 on the board run e81aed813e0f was pointed at. Deliberately
+        LAZY, one listing page at a time: collecting all 254 listings up front means
+        ~an hour before the first document is stored, no progress signal for the GUI,
+        and discovery thrown away entirely if the runner dies partway. The caller has
+        already loaded and scrolled the seed page, and navigates `page` away between
+        yields, so each later listing page is re-fetched by URL.
         """
-        urls, seen, skipped = [], set(), 0
+        seen, skipped, yielded = set(), 0, 0
         listing = _norm_url(seed_url)
         for page_no in range(1, max(1, self.max_listing_pages) + 1):
             if page_no > 1:
                 self._sleep()
                 self._goto(page, listing)
                 self._scroll(page)
+            roots = []
             for url in self._links(page, listing):
-                # Store the thread root: a listing links the same thread several ways
+                # Keep the thread root: a listing links the same thread several ways
                 # (/latest, /post-N, /unread) and each alias would cost a fetch.
                 root = base_thread_url(url)
                 if root in seen:
@@ -311,21 +316,23 @@ class PlaywrightCollector(Collector):
                 if root in self.skip_thread_urls:
                     skipped += 1
                     continue
-                urls.append(root)
-                if len(urls) >= max_docs:
-                    return urls
+                roots.append(root)
             nxt = page.evaluate(_NEXT_JS) or ""
             nxt = _norm_url(urljoin(listing, nxt)) if nxt else ""
+            if self.same_domain_only and nxt and _host(nxt) != _host(seed_url):
+                nxt = ""
+            # Read the next-link BEFORE handing control back: the consumer navigates
+            # `page` to each thread, so the listing DOM is gone by the time we resume.
+            for root in roots:
+                yield root
+                yielded += 1
+                if yielded >= max_docs:
+                    return
+            if skipped:
+                print(f"  listing page {page_no}: skipped {skipped} threads already collected")
             if not nxt or nxt == listing:
-                break
-            if self.same_domain_only and _host(nxt) != _host(seed_url):
-                break
+                return
             listing = nxt
-            print(f"  listing page {page_no + 1}: {len(urls)} threads queued"
-                  + (f", {skipped} already collected" if skipped else ""))
-        if skipped:
-            print(f"  skipping {skipped} threads already in the corpus")
-        return urls
 
     def collect(self, seed_url: str, limit: int) -> Iterator[Document]:
         self._check_allowed(seed_url)
@@ -348,20 +355,17 @@ class PlaywrightCollector(Collector):
                 )
                 page = context.new_page()
                 if self.thread_patterns and any(p in seed_url for p in self.thread_patterns):
-                    urls = [_norm_url(seed_url)]
+                    urls = iter([_norm_url(seed_url)])
                 else:
                     self._goto(page, seed_url)
                     self._scroll(page)
-                    urls = self._listing_thread_urls(page, seed_url, max_docs)
-                    if not urls:
-                        raise PlaywrightCollectorError(
-                            "no thread links found on "
-                            f"{seed_url} matching {self.thread_patterns}; adjust collection.thread_url_patterns"
-                        )
+                    urls = self._iter_listing_threads(page, seed_url, max_docs)
 
                 saved = 0
+                queued = 0
                 seen_canonical, seen_text = set(), set()
-                for url in urls[:max_docs]:
+                for url in urls:
+                    queued += 1
                     self._sleep()
                     self._goto(page, url)
                     self._scroll(page)
@@ -390,9 +394,15 @@ class PlaywrightCollector(Collector):
                         seen_text.add(key)
                         saved += 1
                         yield doc
+                if queued == 0:
+                    raise PlaywrightCollectorError(
+                        "no thread links found on "
+                        f"{seed_url} matching {self.thread_patterns}; "
+                        "adjust collection.thread_url_patterns"
+                    )
                 if saved == 0:
                     raise PlaywrightCollectorError(
-                        f"found {len(urls[:max_docs])} thread links but saved 0 readable pages"
+                        f"visited {queued} thread links but saved 0 readable pages"
                     )
             finally:
                 browser.close()
