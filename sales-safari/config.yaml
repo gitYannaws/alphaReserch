@@ -90,8 +90,15 @@ collection:
     min_delay_seconds: 3
     max_delay_seconds: 8
     timeout_ms: 30000
-    wait_after_load_ms: 2000
-    scroll_steps: 3          # 0 = off; >0 = min scroll rounds before a plateau can stop us
+    # Measured on geomax.me (a board that fronts plain requests with a JS proof-of-work
+    # challenge): a FRESH browser context at 300ms already returns complete posts with no
+    # wall, because a real browser clears the challenge during load. 2000ms was ~1.7s per
+    # page of pure waiting. 800ms keeps headroom over the measured need.
+    wait_after_load_ms: 800
+    # 0 = off. Server-paginated forums (XenForo, Discourse, phpBB) have no lazy feed, so
+    # scrolling cost 3 x 700ms per page and returned nothing; raise it only for a seed that
+    # genuinely infinite-scrolls.
+    scroll_steps: 0          # 0 = off; >0 = min scroll rounds before a plateau can stop us
     scroll_delay_ms: 700     # wait after each scroll for lazy content to load
     max_scrolls: 40          # hard cap on infinite-scroll rounds (safety)
     scroll_settle_rounds: 2  # consecutive no-growth rounds that prove feed is exhausted
