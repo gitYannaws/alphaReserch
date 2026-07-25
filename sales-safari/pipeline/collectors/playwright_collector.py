@@ -25,7 +25,25 @@ BLOCKED_TEXT = (
     "enable javascript and cookies",
     "login required",
     "sign in to continue",
+    # JS interstitials that stand in front of the real page. Safe to list only because a
+    # match now costs a retry and, failing that, one skipped thread -- not a whole run.
+    # Without them a challenge that has not resolved by wait_after_load_ms gets stored as
+    # a ~130-char "Checking your browser" document.
+    "checking your browser",
+    "verifying your connection",
+    "just a moment",
 )
+
+# These markers are ordinary English ("forbidden", "captcha"), so matching them anywhere
+# on a page makes forum members trip the bot-wall detector by writing about them. A
+# member of geomax.me mentioning "forbidden knowledge" aborted a whole crawl. A real wall
+# replaces the page and says so up top, so only a SHORT page gets its PREFIX scanned.
+BLOCK_MAX_BODY_CHARS = 1500     # a real thread runs 10k+ chars; a wall page is tiny
+BLOCK_SCAN_CHARS = 600          # walls announce themselves before any content
+
+# A site-wide block looks like every thread failing in a row; a single unreachable thread
+# is just one bad page. Skip the latter, stop on the former.
+MAX_CONSECUTIVE_THREAD_FAILURES = 5
 
 _WS = re.compile(r"\s+")
 
@@ -71,6 +89,19 @@ class PlaywrightCollectorError(RuntimeError):
 
 def _text_key(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+
+
+def is_blocked_text(text: str | None) -> bool:
+    """Whether page text is a bot/login wall, as opposed to content that discusses one.
+
+    Length gate first: a wall page replaces the content, so it is short. Anything with a
+    real thread's worth of text is content, however many blocked-list words a member used.
+    """
+    text = text or ""
+    if len(text) > BLOCK_MAX_BODY_CHARS:
+        return False
+    low = text[:BLOCK_SCAN_CHARS].lower()
+    return any(marker in low for marker in BLOCKED_TEXT)
 
 
 def _host(url: str) -> str:
@@ -155,9 +186,9 @@ class PlaywrightCollector(Collector):
             )
 
     def _check_page(self, page, url: str) -> bool:
-        status = page.evaluate("() => document.body ? document.body.innerText : ''")
-        low = (status or "").lower()
-        return any(marker in low for marker in BLOCKED_TEXT)
+        """True when the page looks like a bot/login wall rather than content."""
+        return is_blocked_text(
+            page.evaluate("() => document.body ? document.body.innerText : ''"))
 
     def _goto(self, page, url: str):
         for attempt in range(self.limiter.retries + 1):
@@ -364,12 +395,26 @@ class PlaywrightCollector(Collector):
                 saved = 0
                 queued = 0
                 seen_canonical, seen_text = set(), set()
+                consecutive_failures = 0
                 for url in urls:
                     queued += 1
                     self._sleep()
-                    self._goto(page, url)
-                    self._scroll(page)
-                    canonical = self._canonical(page, url)
+                    # Fetching is inside the try: a single thread that 403s, times out or
+                    # renders a wall must not end a crawl of thousands. Only an unbroken
+                    # run of failures is treated as the site shutting us out.
+                    try:
+                        self._goto(page, url)
+                        self._scroll(page)
+                        canonical = self._canonical(page, url)
+                    except Exception as e:
+                        consecutive_failures += 1
+                        print(f"  skip {url}: {e}")
+                        if consecutive_failures >= MAX_CONSECUTIVE_THREAD_FAILURES:
+                            raise PlaywrightCollectorError(
+                                f"{consecutive_failures} consecutive thread failures, "
+                                f"last {url}: {e}") from e
+                        continue
+                    consecutive_failures = 0
                     # Both keys: the declared canonical, and the thread root it belongs to.
                     # /threads/x.9700/latest and /threads/x.9700/page-2 declare different
                     # canonicals but are the same thread, and the post walk below covers

@@ -15,7 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.collectors.playwright_collector import (
-    BOILERPLATE_SELECTOR, PlaywrightCollector, _text_key,
+    BLOCK_MAX_BODY_CHARS, BOILERPLATE_SELECTOR, PlaywrightCollector,
+    is_blocked_text, _text_key,
 )
 from pipeline.collectors.xenforo_collector import (
     base_thread_url, is_xenforo_html, parse_thread_posts,
@@ -204,6 +205,35 @@ class ListingPaginationTests(unittest.TestCase):
         urls = list(self._collector(5)._iter_listing_threads(page, order[0], 100))
         self.assertEqual(urls, ["https://x.me/threads/a.1"])
         self.assertEqual(page.visited, [order[0]])
+
+
+class BlockedPageDetectionTests(unittest.TestCase):
+    """A member writing "forbidden" is not a bot wall (this aborted a 254-page crawl)."""
+
+    def test_content_mentioning_blocked_words_is_not_a_wall(self):
+        post = ("taking trips to the vatican monthly to see if there is any forbidden "
+                "knowledge or shady characters popping up. ")
+        thread = "Having a gf and kids is bare minimum " + post * 40
+        self.assertGreater(len(thread), BLOCK_MAX_BODY_CHARS)
+        self.assertFalse(is_blocked_text(thread))
+
+    def test_real_walls_are_still_caught(self):
+        for wall in ("Access denied. You do not have permission.",
+                     "Please complete the captcha to continue.",
+                     "403 Forbidden",
+                     "Too many requests. Slow down.",
+                     "Login required to view this page.",
+                     "Checking your browser. Verifying your connection."):
+            with self.subTest(wall=wall):
+                self.assertTrue(is_blocked_text(wall))
+
+    def test_marker_below_the_scan_window_of_a_short_page_is_ignored(self):
+        # Short page, but the word appears late -- a wall says it up front.
+        self.assertFalse(is_blocked_text("x" * 800 + " forbidden"))
+
+    def test_empty_and_none_are_not_walls(self):
+        self.assertFalse(is_blocked_text(""))
+        self.assertFalse(is_blocked_text(None))
 
 
 class DedupeHelperTests(unittest.TestCase):
