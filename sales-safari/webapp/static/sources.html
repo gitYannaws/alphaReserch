@@ -39,6 +39,11 @@
   .badge.warn{color:#e0a030;border-color:#e0a030}
   .badge.err{color:var(--err);border-color:var(--err)}
   .badge.dim{color:var(--mut);border-color:var(--line)}
+  .spin{display:inline-block;width:13px;height:13px;vertical-align:-2px;margin-right:8px;
+        border:2px solid var(--line);border-top-color:var(--acc);border-radius:50%;
+        animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
   .kickbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   .progbar{background:#0c0d11;border:1px solid var(--line);border-radius:5px;height:8px;overflow:hidden;flex:1;min-width:160px}
   .progfill{background:var(--acc);height:100%;transition:width .3s}
@@ -219,7 +224,17 @@ async function loadExtractorOptions(){
 }
 
 async function loadSources(){
-  SOURCES = await (await fetch("/api/sources")).json();
+  // /api/sources aggregates every corpus document, so it takes seconds on a large DB --
+  // say so instead of leaving the table blank.
+  $("rows").innerHTML =
+    `<tr><td colspan="12" class="dim"><span class="spin"></span>loading sources…</td></tr>`;
+  try{
+    SOURCES = await (await fetch("/api/sources")).json();
+  }catch(e){
+    $("rows").innerHTML =
+      `<tr><td colspan="12" class="err">could not load sources: ${esc(e.message)}</td></tr>`;
+    return;
+  }
   renderRows();
 }
 function selectedIds(){

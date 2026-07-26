@@ -17,7 +17,7 @@ _SALT = os.environ.get("SAFARI_SALT", "sales-safari-v1")
 # Bump whenever a ONE-TIME data repair is added to _migrate(). Plain schema additions
 # (new table / column / index) do not need a bump - they are re-applied idempotently on
 # every connect because they are cheap; one-time repairs are gated on this.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
@@ -97,6 +97,17 @@ CREATE TABLE IF NOT EXISTS corpus_documents(
 );
 CREATE INDEX IF NOT EXISTS idx_corpus_documents_key ON corpus_documents(corpus_key);
 CREATE INDEX IF NOT EXISTS idx_corpus_documents_doc ON corpus_documents(document_id);
+
+-- Which runs touched which corpus. Derivable from run_documents x corpus_documents, but
+-- that derivation is a ~1.1M-row join for ~70 real pairs, and the Sources page needs it
+-- once per source on every load. Recorded directly instead.
+CREATE TABLE IF NOT EXISTS run_corpora(
+  run_id TEXT,
+  corpus_key TEXT,
+  linked_at TEXT,
+  PRIMARY KEY(run_id, corpus_key)
+);
+CREATE INDEX IF NOT EXISTS idx_run_corpora_key ON run_corpora(corpus_key);
 
 CREATE TABLE IF NOT EXISTS pains(
   id TEXT PRIMARY KEY,
@@ -380,6 +391,14 @@ def _migrate(conn):
         conn.execute(
             "INSERT OR IGNORE INTO run_documents(run_id, document_id, collected_at) "
             "SELECT run_id, id, fetched_at FROM documents WHERE run_id IS NOT NULL"
+        )
+    if version < 19:
+        # Recover the run<->corpus pairs that were only ever implicit in the join. Costs a
+        # full run_documents scan, which is exactly why it happens once here and never again.
+        conn.execute(
+            "INSERT OR IGNORE INTO run_corpora(run_id, corpus_key, linked_at) "
+            "SELECT DISTINCT rd.run_id, cd.corpus_key, NULL "
+            "FROM corpus_documents cd JOIN run_documents rd ON rd.document_id=cd.document_id"
         )
     if version != SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -728,6 +747,9 @@ class Store:
             "SELECT ?, cd.document_id, COALESCE(cd.collected_at, ?) "
             "FROM corpus_documents cd WHERE cd.corpus_key=?",
             (run_id, ts, corpus_key))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO run_corpora(run_id,corpus_key,linked_at) VALUES(?,?,?)",
+            (run_id, corpus_key, ts))
         self.conn.commit()
         return cur.rowcount or 0
 
@@ -753,25 +775,39 @@ class Store:
           "stale"       - was caught up but hasn't run in a while; new content may exist
           "growing"     - last run added a meaningful share; keep collecting
         """
-        from datetime import datetime, timezone
         doc_count = self.count_corpus_documents(corpus_key)
         corpus = self.get_corpus(corpus_key) or {}
-        backfill_completed_at = corpus.get("backfill_completed_at")
+        row = self._latest_run_per_corpus((corpus_key,)).get(corpus_key)
+        return self._freshness_from_parts(
+            doc_count, corpus.get("backfill_completed_at"), row,
+            stale_days, low_yield_ratio, low_yield_floor, mid_yield_ratio)
+
+    def _latest_run_per_corpus(self, corpus_keys) -> dict:
+        """Newest run touching each corpus, as {corpus_key: (job_id, created_at,
+        inherited_doc_count)}. Reads run_corpora, so it stays a handful of indexed row
+        lookups no matter how large run_documents grows."""
+        keys = [k for k in corpus_keys if k]
+        if not keys:
+            return {}
+        marks = ",".join("?" * len(keys))
+        rows = self.conn.execute(
+            "SELECT rc.corpus_key, r.job_id, r.created_at, r.inherited_doc_count "
+            "FROM run_corpora rc JOIN runs r ON r.job_id=rc.run_id "
+            f"WHERE rc.corpus_key IN ({marks}) "
+            "ORDER BY r.created_at ASC",
+            keys,
+        ).fetchall()
+        # ascending, so the last write per key wins == the newest run
+        return {r[0]: (r[1], r[2], r[3]) for r in rows}
+
+    def _freshness_from_parts(self, doc_count, backfill_completed_at, row,
+                              stale_days=14.0, low_yield_ratio=0.005,
+                              low_yield_floor=5, mid_yield_ratio=0.05) -> dict:
+        from datetime import datetime, timezone
         if doc_count == 0:
             return {"doc_count": 0, "last_run_at": None, "last_run_new_docs": None,
                     "days_since_last_run": None, "backfill_completed_at": backfill_completed_at,
                     "status": "no_data"}
-
-        row = self.conn.execute(
-            "SELECT r.job_id, r.created_at, r.inherited_doc_count "
-            "FROM runs r "
-            "JOIN run_documents rd ON rd.run_id=r.job_id "
-            "JOIN corpus_documents cd ON cd.document_id=rd.document_id "
-            "WHERE cd.corpus_key=? "
-            "GROUP BY r.job_id, r.created_at, r.inherited_doc_count "
-            "ORDER BY r.created_at DESC LIMIT 1",
-            (corpus_key,),
-        ).fetchone()
 
         if not backfill_completed_at:
             last_run_at = row[1] if row else None
@@ -914,10 +950,19 @@ class Store:
                 "doc_count", "thread_count", "author_count", "total_bytes",
                 "earliest_post_at", "latest_post_at", "last_fetched_at"]
         out = [dict(zip(cols, row)) for row in rows]
+        # Freshness for every source in two set-based queries, not one pair per source: the
+        # per-source call used to walk run_documents and cost ~570ms each.
+        latest = self._latest_run_per_corpus([s["corpus_key"] for s in out])
+        backfills = dict(self.conn.execute(
+            "SELECT corpus_key, backfill_completed_at FROM corpora").fetchall())
         for src in out:
-            fresh = (self.get_corpus_freshness(src["corpus_key"]) if src["corpus_key"]
-                     else {"status": "no_data", "last_run_new_docs": None,
-                           "days_since_last_run": None, "backfill_completed_at": None})
+            key = src["corpus_key"]
+            if key:
+                fresh = self._freshness_from_parts(
+                    src["doc_count"], backfills.get(key), latest.get(key))
+            else:
+                fresh = {"status": "no_data", "last_run_new_docs": None,
+                         "days_since_last_run": None}
             src["freshness"] = fresh["status"]
             src["last_run_new_docs"] = fresh["last_run_new_docs"]
             src["days_since_last_run"] = fresh["days_since_last_run"]
