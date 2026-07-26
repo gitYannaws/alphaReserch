@@ -3,6 +3,9 @@
 Niche pain-mining pipeline. Scrape a community, extract complaints, cluster into themes,
 score demand, check competition, rank, generate + validate product ideas. Forum-first.
 
+## Git workflow
+**Never create a branch.** Commit and push directly to `master`.
+
 ## Stack
 - Python 3.12, SQLite (single file `db/safari.sqlite`)
 - Collection: Discourse JSON (plain `requests`) primary; Firecrawl only when explicitly approved
