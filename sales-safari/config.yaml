@@ -38,12 +38,19 @@ collection:
   # max_multiplier) and retries the same request after an escalating cooldown;
   # successes decay the multiplier back toward 1. Reddit uses its own conservative
   # fixed-delay/cooldown settings below.
+  # Tuned for a board that throttles a long backfill rather than one that blocks outright.
+  # At retries:2 / cooldown:5 the crawler spent ~21s (8s + 12.8s) on a 403 and then gave
+  # up; on run e81aed813e0f that abandoned LISTING page 51 of ~254 and ended the pass with
+  # ~81% of the board uncollected. The settings below wait ~8.4 minutes across 5 retries
+  # before abandoning a page, so a throttle costs a pause instead of the whole run.
+  # Healthy crawling is unchanged -- the multiplier sits at 1.0 and pacing stays the
+  # min/max_delay_seconds below. Only a throttled crawl slows down, which is the point.
   rate_limit:
     backoff: 1.6            # delay multiplier bump per 403/429
-    max_multiplier: 8.0    # cap on the multiplier
-    recover: 0.9           # decay toward 1.0 on each success
-    retries: 2             # adaptive retries of a 403'd request before skipping the thread
-    cooldown_seconds: 5.0  # base pause on a 403 (scaled by the current multiplier)
+    max_multiplier: 16.0   # cap on the multiplier
+    recover: 0.95          # decay toward 1.0 on each success (slower = stays cautious)
+    retries: 5             # adaptive retries of a 403'd request before skipping the thread
+    cooldown_seconds: 20.0 # base pause on a 403 (scaled by the current multiplier)
   # render = auto-pick renderer: XenForo if the board is XenForo, else Playwright (GUI "Render" toggle)
   # Discourse: auto-detected by probe, free public JSON, per-post authored + like counts.
   # /t/{id}.json embeds only the first ~20 posts, so the rest are fetched by id from
