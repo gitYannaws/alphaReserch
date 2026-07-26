@@ -192,6 +192,16 @@ class Runner:
                 f"{progress['done']}/{progress['total']} {progress.get('unit') or ''}".strip(),
             )
             return progress["stage"]
+        # A run still parked on stage 1 never finished collecting, whatever the progress row
+        # says. run_stage() zeroes progress to 0/0 the moment a stage starts, so a runner
+        # that dies inside collect before its first beat leaves no `done < total` signal --
+        # and the artifact scan below then sees run_documents > 0 and jumps to extract on a
+        # part-collected board. Run 081f2ff31b20 skipped collection that way at 241 of
+        # ~5,300 threads. Collect is dedupe-safe, so re-entering it is the cheap error.
+        run = self.store.get_run(self.job_id) or self.run_info or {}
+        if int(run.get("stage") or 0) <= 1:
+            self.log("STATUS", "run never advanced past stage 1; resuming collection")
+            return 1
         counts = {t: self._count(t) for _, t in _CORE_ARTIFACTS}
         self.log("STATUS", "stored artifacts: "
                  + ", ".join(f"{t}={counts[t]}" for _, t in _CORE_ARTIFACTS))

@@ -1369,28 +1369,45 @@ def _resume_runner_alive(job_id: str) -> bool:
 
 
 def _spawn_resume_runner(job_id: str):
+    # Never DEVNULL the runner's streams. Its own `resume-{job}.log` only covers what the
+    # Runner itself chose to log; anything that kills the process outside that -- an import
+    # error, a Chromium/ICU abort, a bare traceback -- lands on stderr and would vanish.
+    # Run 081f2ff31b20 died two seconds after `collector=playwright` with no diagnosis at
+    # all because of this. Files are appended so restarts keep the history.
+    out = err = None
+    try:
+        out = open(ROOT / "db" / f"resume-{job_id}.out.log", "ab")
+        err = open(ROOT / "db" / f"resume-{job_id}.err.log", "ab")
+    except OSError:
+        out = err = None
     kwargs = dict(
         cwd=str(ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=out if out is not None else subprocess.DEVNULL,
+        stderr=err if err is not None else subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
     )
     argv = [sys.executable, "-m", "pipeline.resume", job_id]
-    if sys.platform.startswith("win"):
-        # Detach the runner so it outlives this server being reaped/tree-killed, not just a
-        # clean exit. DETACHED_PROCESS gives it no console, CREATE_NEW_PROCESS_GROUP isolates
-        # it from console/Ctrl-C signals, and CREATE_BREAKAWAY_FROM_JOB lets it escape a
-        # parent Job object set to kill children on close. Breakaway raises if the Job
-        # forbids it, so fall back to a plain detached spawn. (The startup reconcile still
-        # respawns anything that slips through, so this is best-effort, not the only net.)
-        DETACHED_PROCESS = 0x00000008
-        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
-        base = DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        try:
-            return subprocess.Popen(argv, creationflags=base | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
-        except OSError:
-            return subprocess.Popen(argv, creationflags=base, **kwargs)
-    return subprocess.Popen(argv, start_new_session=True, **kwargs)
+    try:
+        if sys.platform.startswith("win"):
+            # Detach the runner so it outlives this server being reaped/tree-killed, not just a
+            # clean exit. DETACHED_PROCESS gives it no console, CREATE_NEW_PROCESS_GROUP isolates
+            # it from console/Ctrl-C signals, and CREATE_BREAKAWAY_FROM_JOB lets it escape a
+            # parent Job object set to kill children on close. Breakaway raises if the Job
+            # forbids it, so fall back to a plain detached spawn. (The startup reconcile still
+            # respawns anything that slips through, so this is best-effort, not the only net.)
+            DETACHED_PROCESS = 0x00000008
+            CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+            base = DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            try:
+                return subprocess.Popen(argv, creationflags=base | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+            except OSError:
+                return subprocess.Popen(argv, creationflags=base, **kwargs)
+        return subprocess.Popen(argv, start_new_session=True, **kwargs)
+    finally:
+        # The child inherited its own duplicates; drop ours so the parent doesn't hold them.
+        for fh in (out, err):
+            if fh is not None:
+                fh.close()
 
 
 def _reconcile_orphaned_runs():
