@@ -242,7 +242,40 @@ webapp/
   `support_reasons`; two copies of that arithmetic would drift and silently lose an
   opportunity rank would have accepted.
 - **Warning flags are advisory (stage 7b).** Flag caveats clearly without hiding the theme. They never drop a theme; `min_support` at rank is the only gate.
-- **Persistence is the real signal.** Complaints post-dating an incumbent's launch = incumbent is bad = opportunity. It is a property of the pain, scored in demand (stage 6), and is a rank multiplier. NOTE: currently a keyword proxy, not yet the true complaint-date-vs-launch test. Saturation is not the inverse of opportunity.
+- **A signal that is computed and then clamped away is not a signal** (`score_full_at`).
+  Stage 6 scored linearly under a hard `min(10, ...)`: `frequency = authors * 2.5` hit the
+  ceiling at FOUR authors and `recurrence = authors * 1.8` at six. On run `pbfamily0001`
+  frequency read exactly 10.00 on 40% of all themes and on effectively every theme that
+  ranked, so a 5-author theme and a 23-author theme were indistinguishable and the top of
+  the list filled with the smallest themes that could clear `min_support`. The upvote signal
+  was added *inside* the same clamp and vanished with it, on a corpus where 177,130
+  documents carry a score of up to 2,990. Log curves (`_log_scale`, anchored by
+  `score_full_at`) keep rising instead. After: frequency and recurrence pin at 10 on **zero**
+  themes and the median size of the top 20 rose from 6 to 9.
+- **Recurrence must not be a second copy of frequency.** It used to lead with
+  `distinct_authors * 1.8`, so both terms measured the same thing and both pinned at 10.00 on
+  every ranked theme. Recurrence is the pain COMING BACK — the same complaint in separate
+  threads, workarounds described, phrasing repeated. Author count is frequency's job and is
+  not counted twice.
+- **Persistence is the real signal, and it now reads real dates.** The keyword proxy gave
+  7,775 of `pbfamily0001`'s 8,925 themes the identical 3.0 and the whole run held **4**
+  distinct values — a rank multiplier that does nothing — while longer themes contained more
+  keywords, so what signal it had tracked cluster size. It is now `span` (months between the
+  theme's first and last complaint) plus `recency` (share in the last 12 months), weighted
+  6:3 because a burst last month is not persistence. After: **686 distinct values across
+  1.0–9.53**. "Now" is the corpus's own newest document (`corpus_latest_date`), never the
+  wall clock, so re-scoring a finished run cannot quietly age it. Sources with no dates fall
+  back to the keyword proxy.
+- **A forum corpus is full of people complaining about the forum** (`platform_meta` +
+  `rank.drop_warnings`). An LLM cheerfully calls venue chatter software-solvable:
+  `pbfamily0001` ranked "moderator abuse and unfair bans" at 8 and "subreddit toxicity" at
+  11; the re-run put "frequent unwanted posts on home page" at 4. Real complaints, wrong
+  market. The tag is judged **per member, then by share** (`PLATFORM_META_MIN_SHARE`, 0.5) —
+  unlike every other tag, which fires on one hit anywhere in the theme — because this one can
+  DROP, so it has to be right about the theme rather than about one post. Warnings stay
+  advisory by default; `rank.drop_warnings` is the operator naming the few that disqualify.
+  After: venue-meta in the top 100 fell from 10 to 4, and 389 themes were dropped by the tag.
+- **Persistence lives in demand, not competition.** Complaints post-dating an incumbent's launch = incumbent is bad = opportunity. It is a property of the pain, scored in demand (stage 6), and is a rank multiplier. NOTE: currently a keyword proxy, not yet the true complaint-date-vs-launch test. Saturation is not the inverse of opportunity.
 - **Privacy.** Store `author_hash` (salted), never raw usernames. Treat raw markdown and verbatim spans as potentially identifying in exports.
 
 ## Access boundaries (learned)

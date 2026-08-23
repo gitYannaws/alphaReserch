@@ -1383,7 +1383,8 @@ class Store:
         """
         sql = ("SELECT c.id,c.label,c.size,c.distinct_authors,p.id,p.complaint,"
                "p.workflow_pain,p.workaround,p.wish,p.persona,p.verbatim_span,"
-               "p.source_permalink,p.author_hash,d.source_granularity,d.score,d.thread_url,d.title "
+               "p.source_permalink,p.author_hash,d.source_granularity,d.score,d.thread_url,"
+               "d.title,d.created_at "
                "FROM clusters c "
                "JOIN cluster_members cm ON cm.cluster_id=c.id "
                "JOIN pains p ON p.id=cm.pain_id "
@@ -1423,6 +1424,10 @@ class Store:
                 "score": r[14],
                 "thread_url": r[15],
                 "title": r[16],
+                # When the complaint was POSTED. Stage 6 needs it to measure persistence as
+                # the real thing (does this pain keep recurring over time) rather than by
+                # counting words like "still" and "again".
+                "created_at": r[17],
             })
         return list(clusters.values())
 

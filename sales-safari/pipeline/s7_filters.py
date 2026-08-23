@@ -85,6 +85,40 @@ FILTER_PATTERNS = {
 }
 
 
+# A theme about the VENUE, not about the market. A forum corpus is full of these: people on
+# Reddit complain about Reddit. Run pbfamily0001 ranked "moderator abuse and unfair bans" at
+# 8, "subreddit toxicity" at 11 and "Posts receive very little engagement" at 12; after the
+# re-run, "frequent unwanted posts on home page" sat at 4 and "Reddit showing disgusting
+# content" at 10. Real complaints, but they are not this market's pain.
+PLATFORM_META_PATTERNS = (
+    r"\bsub(reddit)?s?\b", r"\breddit(ors?)?\b", r"\bmod(erator)?s?\b",
+    r"\bdownvot", r"\bupvot", r"\bkarma\b", r"\bflair\b", r"\bshadow ?ban",
+    r"\bthis (sub|forum|group|thread|post|board|community)\b",
+    r"\bcomment section\b", r"\btrolls?\b", r"\bbanned\b", r"\bthe algorithm\b",
+    r"\bmy (feed|home ?page|timeline)\b", r"\bthe rules\b", r"\bdeleted\b",
+)
+# Judged per MEMBER, then by share. The other tags fire on a single hit anywhere in the
+# theme's text, which is fine for a caveat ("someone mentioned a visa") but wrong here: one
+# post saying "this sub" must not brand a whole market theme as venue chatter. This tag can
+# be configured to DROP, so it has to be right about the theme, not about one post.
+PLATFORM_META_MIN_SHARE = 0.5
+
+
+def _pain_text(pain: dict) -> str:
+    return " ".join(str(pain.get(k) or "") for k in (
+        "complaint", "workflow_pain", "workaround", "wish", "verbatim_span")).lower()
+
+
+def platform_meta_share(cluster: dict) -> float:
+    """Fraction of a theme's pains that are talking about the forum itself."""
+    pains = cluster.get("pains") or []
+    if not pains:
+        return 0.0
+    hits = sum(1 for p in pains
+               if any(re.search(pat, _pain_text(p)) for pat in PLATFORM_META_PATTERNS))
+    return hits / len(pains)
+
+
 def _cluster_text(cluster: dict) -> str:
     return "\n".join(
         " ".join(str(p.get(k) or "") for k in (
@@ -97,6 +131,10 @@ def evaluate_cluster(cluster: dict, enabled_filters) -> list:
     text = _cluster_text(cluster)
     reasons = []
     for name in enabled_filters:
+        if name == "platform_meta":
+            if platform_meta_share(cluster) >= PLATFORM_META_MIN_SHARE:
+                reasons.append(name)
+            continue
         for pattern in FILTER_PATTERNS.get(name, ()):
             if re.search(pattern, text):
                 reasons.append(name)

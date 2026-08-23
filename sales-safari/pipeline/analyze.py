@@ -25,7 +25,8 @@ def analyze_run(store, run_id: str, cfg: dict, root: Path = Path(".")) -> dict:
     rank_weights = rank_cfg.get("solvable_weights")
 
     stats = {
-        "demand": demand_run(store, run_id, cfg.get("scoring_weights", {})),
+        "demand": demand_run(store, run_id, cfg.get("scoring_weights", {}),
+                             full_at=cfg.get("score_full_at")),
     }
     if cfg.get("soft_filter", {}).get("enabled", True):
         stats["soft_filter"] = softfilter_run(
@@ -38,7 +39,8 @@ def analyze_run(store, run_id: str, cfg: dict, root: Path = Path(".")) -> dict:
     stats["rank"] = rank_run(
         store, run_id, solvable_weights=rank_weights,
         allowed_solvability=rank_cfg.get("allowed_solvability"),
-        min_support=rank_cfg.get("min_support"))
+        min_support=rank_cfg.get("min_support"),
+        drop_warnings=rank_cfg.get("drop_warnings"))
     stats["ideas"] = ideas_run(store, run_id, cfg.get("ideas", {}).get("top_n", 5),
                                extract_cfg=cfg.get("extract", {}),
                                model=cfg.get("ideas", {}).get("model"))

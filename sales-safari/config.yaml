@@ -315,6 +315,23 @@ cluster:
   semantic_label_only: true
   audit_min_cluster_size: 5
 
+# §6 how much evidence earns a full 10 on the log curves in stage 6.
+#
+# The old scoring was linear with a hard min(10, ...): frequency was `authors * 2.5`, which
+# hit the ceiling at FOUR authors, and recurrence was `authors * 1.8`, which hit it at six.
+# Measured on run pbfamily0001: frequency read exactly 10.00 on 40% of all themes and on
+# effectively every theme that ranked, so a 5-author theme and a 23-author theme scored the
+# same and the ranking filled with the smallest themes that could clear min_support. The
+# upvote signal was computed and then swallowed by the same ceiling, on a corpus where
+# 177,130 documents carry a score of up to 2,990.
+#
+# A log curve keeps rising. Set each anchor near the biggest value a healthy run produces:
+# pbfamily0001's largest theme has 23 authors, so 25 voices spreads the real range.
+score_full_at:
+  voices: 25      # distinct authors + half of repeat posts + upvote bonus
+  threads: 12     # separate threads the same complaint surfaces in (recurrence)
+  months: 36      # span between a theme's first and last complaint (persistence)
+
 # §6 demand scoring weights
 scoring_weights:
   pain_intensity: 3
@@ -330,6 +347,7 @@ scoring_weights:
 # The first four are B2B-SaaS shaped and fired on only 5 of 920 themes (0.5%) against an
 # expat/travel corpus; the rest are domain-relevant. Trim to match the niche you mine.
 hard_filters:
+  - platform_meta
   - requires_soc2_hipaa
   - two_sided_marketplace
   - closed_api_dependency
@@ -352,6 +370,18 @@ rank:
   # Tiny/single-thread clusters stay in the database but do not become ranked
   # market opportunities or idea seeds.
   min_support: {evidence_count: 5, distinct_authors: 4, distinct_threads: 3}
+  # Warning tags are advisory by default and that stays true. This is the operator naming,
+  # explicitly, the few that DO disqualify a theme from the ranked opportunities.
+  #
+  # `platform_meta` is why it exists. A forum corpus is full of people complaining about the
+  # forum, and an LLM cheerfully calls that software-solvable: run pbfamily0001 ranked
+  # "moderator abuse and unfair bans" at 8, "subreddit toxicity" at 11 and "Posts receive
+  # very little engagement" at 12; the re-run put "frequent unwanted posts on home page" at
+  # 4 and "Reddit showing disgusting content" at 10. Real complaints. Not this market's pain.
+  #
+  # The theme keeps its row, its tag and its place in the audit view. It just stops taking a
+  # slot in the ranked list. Empty this to make every warning advisory again.
+  drop_warnings: [platform_meta]
 
 # §7.5 soft filter: LLM tags each theme software-solvable (yes/partial/no) for UI color.
 # Advisory only - never drops. Batched so large runs do not exceed context windows.

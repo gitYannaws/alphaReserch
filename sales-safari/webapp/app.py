@@ -428,7 +428,8 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
     from pipeline.s6_demand import demand_run
     _stage(job, "stage 6 demand",
            lambda: demand_run(store, job_id, run_cfg.get("scoring_weights", {}),
-                              progress=lambda d, t: _set_stage_progress(6, d, t, "themes")))
+                              progress=lambda d, t: _set_stage_progress(6, d, t, "themes"),
+                              full_at=run_cfg.get("score_full_at")))
 
     # Stage 7b: one advisory pass — software-solvability (LLM) + warning tags (regex).
     # The old separate stage-7 filters pass was folded in here: it was free regex over the
@@ -474,6 +475,7 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
                     lambda: rank_run(store, job_id, solvable_weights=_rank_w,
                                      allowed_solvability=_rank_cfg.get("allowed_solvability"),
                                      min_support=_rank_cfg.get("min_support"),
+                                     drop_warnings=_rank_cfg.get("drop_warnings"),
                                      progress=lambda d, t: _set_stage_progress(9, d, t, "themes")))
     job.update(ranked=ranked["ranked"], dropped=ranked["dropped"])
 

@@ -60,9 +60,19 @@ def support_reasons(support: dict, thresholds: dict) -> list:
 
 
 def rank_run(store, run_id: str, solvable_weights: dict = None, min_support: dict = None,
-             progress=None, allowed_solvability: list[str] = None) -> dict:
+             progress=None, allowed_solvability: list[str] = None,
+             drop_warnings: list[str] = None) -> dict:
     weights = {**DEFAULT_SOLVABLE_WEIGHTS, **(solvable_weights or {})}
     min_support = min_support or {}
+    # Warning tags are advisory BY DEFAULT and that rule stands - a caveat must not quietly
+    # delete a theme. `drop_warnings` is the operator naming, explicitly and in config, the
+    # few tags that do disqualify. It exists for `platform_meta`: a forum corpus is full of
+    # people complaining about the forum, and those are real complaints that are not this
+    # market's pain. Run pbfamily0001 ranked "moderator abuse and unfair bans" at 8 and
+    # "subreddit toxicity" at 11; the re-run put "frequent unwanted posts on home page" at 4.
+    # The theme stays in the database with its tag, visible in the audit. It just stops
+    # occupying a slot in the ranked opportunities.
+    disqualifying = {str(w).strip().lower() for w in (drop_warnings or []) if str(w).strip()}
     allowed = None if allowed_solvability is None else {
         str(value).strip().lower() for value in allowed_solvability if str(value).strip()
     }
@@ -110,9 +120,10 @@ def rank_run(store, run_id: str, solvable_weights: dict = None, min_support: dic
             solvability_reasons = [] if allowed is None or solvable in allowed else [
                 "not_rankable_solvability"
             ]
-        dropped = bool(r[4] or support_gaps or solvability_reasons)
-        rank_score = 0.0 if dropped else round(base * sw, 2)
         reasons = json.loads(r[5] or "[]")
+        blocking = [w for w in reasons if str(w).strip().lower() in disqualifying]
+        dropped = bool(r[4] or support_gaps or solvability_reasons or blocking)
+        rank_score = 0.0 if dropped else round(base * sw, 2)
         reasons.extend(support_gaps)
         reasons.extend(solvability_reasons)
         ranked.append({
@@ -131,6 +142,7 @@ def rank_run(store, run_id: str, solvable_weights: dict = None, min_support: dic
                 "solvable": solvable,
                 "solvable_weight": sw,
                 "warning_flags": reasons,
+                "disqualifying_warnings": blocking,
                 "support": support,
                 "min_support": min_support,
                 "allowed_solvability": sorted(allowed) if allowed is not None else None,
@@ -152,4 +164,6 @@ def rank_run(store, run_id: str, solvable_weights: dict = None, min_support: dic
     store.set_stage(run_id, 9, "ranked")
     return {"ranked": len([r for r in ranked if not r["dropped"]]),
             "dropped": len([r for r in ranked if r["dropped"]]),
+            "dropped_by_warning": len([r for r in ranked
+                                       if r["rank_breakdown"]["disqualifying_warnings"]]),
             "solvability_gate": "disabled_no_verdicts" if gate_disabled else "applied"}

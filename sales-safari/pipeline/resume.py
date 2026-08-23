@@ -376,9 +376,11 @@ class Runner:
 
     def _demand(self, store):
         from pipeline.s6_demand import demand_run
-        demand_run(store, self.job_id, self.cfg.get("scoring_weights", {}),
-                   progress=lambda d, t: self._set_progress(6, d, t, "themes"))
-        return f"demand_scores={self._count('demand_scores')}"
+        r = demand_run(store, self.job_id, self.cfg.get("scoring_weights", {}),
+                       progress=lambda d, t: self._set_progress(6, d, t, "themes"),
+                       full_at=self.cfg.get("score_full_at"))
+        return (f"demand_scores={self._count('demand_scores')} "
+                f"persistence_from_dates={r.get('persistence_from_dates')}")
 
     def _softfilter(self, store):
         """Stage 7b: one advisory pass = software-fit (LLM) + warning tags (regex).
@@ -420,6 +422,7 @@ class Runner:
                      solvable_weights=rank_cfg.get("solvable_weights"),
                      allowed_solvability=rank_cfg.get("allowed_solvability"),
                      min_support=rank_cfg.get("min_support"),
+                     drop_warnings=rank_cfg.get("drop_warnings"),
                      progress=lambda d, t: self._set_progress(9, d, t, "themes"))
         return f"ranked={r['ranked']} dropped={r['dropped']}"
 
