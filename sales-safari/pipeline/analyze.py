@@ -32,7 +32,9 @@ def analyze_run(store, run_id: str, cfg: dict, root: Path = Path(".")) -> dict:
             store, run_id, cfg.get("extract", {}),
             batch_size=cfg.get("soft_filter", {}).get("batch_size", 40),
             max_batch_chars=cfg.get("soft_filter", {}).get("max_batch_chars", 8000),
-            enabled_filters=cfg.get("hard_filters", []))
+            enabled_filters=cfg.get("hard_filters", []),
+            min_support=(rank_cfg.get("min_support")
+                         if cfg.get("soft_filter", {}).get("only_rankable", True) else None))
     stats["rank"] = rank_run(
         store, run_id, solvable_weights=rank_weights,
         allowed_solvability=rank_cfg.get("allowed_solvability"),

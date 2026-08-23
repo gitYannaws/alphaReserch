@@ -362,6 +362,14 @@ soft_filter:
   # model whose default context is ~4096, so the prompt truncated and 632 of 642 themes came
   # back unclassified (silently "unknown", killing the solvable_weight signal at rank).
   max_batch_chars: 8000
+  # Skip the LLM call for themes that can never clear rank's own `min_support` below. On run
+  # pbfamily0001 only 2,185 of 8,925 themes cleared it, and this pass spent 186 minutes
+  # classifying all 8,925 at ~1.25s each. Restricting it to the rankable quarter costs about
+  # 46 minutes and, checked against that run's results, loses NONE of the 856 themes that
+  # ranked. Skipped themes keep their row and their free regex warnings; their verdict reads
+  # `not_evaluated`, which is distinct from `unknown` (asked, no answer). Set false to
+  # classify every theme, which is what the audit view wants at 4x the wall clock.
+  only_rankable: true
 
 # §8 competitor discovery sources
 competitor_sources: [web, g2, capterra, producthunt, appstore]

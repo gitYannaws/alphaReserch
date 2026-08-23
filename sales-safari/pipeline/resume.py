@@ -384,12 +384,16 @@ class Runner:
         """Stage 7b: one advisory pass = software-fit (LLM) + warning tags (regex).
         The old stage-7 filters pass was folded in here."""
         from pipeline.s7b_softfilter import softfilter_run
+        sf_cfg = self.cfg.get("soft_filter", {})
         sf = softfilter_run(store, self.job_id, self.cfg.get("extract", {}),
                             progress=lambda d, t: self._set_progress(7, d, t, "themes"),
-                            batch_size=self.cfg.get("soft_filter", {}).get("batch_size", 40),
-                            max_batch_chars=self.cfg.get("soft_filter", {}).get("max_batch_chars", 8000),
-                            enabled_filters=self.cfg.get("hard_filters", []))
-        return f"solvable={sf.get('counts')} warned={sf.get('flagged')}"
+                            batch_size=sf_cfg.get("batch_size", 40),
+                            max_batch_chars=sf_cfg.get("max_batch_chars", 8000),
+                            enabled_filters=self.cfg.get("hard_filters", []),
+                            min_support=(self.cfg.get("rank", {}).get("min_support")
+                                         if sf_cfg.get("only_rankable", True) else None))
+        return (f"solvable={sf.get('counts')} warned={sf.get('flagged')} "
+                f"skipped_unrankable={sf.get('skipped_unrankable')}")
 
     def _competitors(self, store):
         from pipeline.s9b_competitors import competitors_run

@@ -22,23 +22,30 @@ DEFAULT_SOLVABLE_WEIGHTS = {"yes": 1.0, "partial": 0.6, "no": 0.25, "unknown": 0
 VALID_SOLVABILITY = {"yes", "partial", "no"}
 
 
+def cluster_support(cluster: dict) -> dict:
+    """Evidence / author / thread counts for one theme.
+
+    Public because stage 7b uses the SAME rule to decide which themes are worth paying an
+    LLM to classify. Two copies of this arithmetic would drift, and a 7b that skipped a
+    theme rank would have accepted is a silently missing opportunity.
+    """
+    threads = {
+        p.get("thread_url") or p.get("title") or p.get("source_permalink")
+        for p in cluster.get("pains", [])
+        if p.get("thread_url") or p.get("title") or p.get("source_permalink")
+    }
+    return {
+        "evidence_count": len(cluster.get("pains", [])),
+        "distinct_authors": int(cluster.get("distinct_authors") or 0),
+        "distinct_threads": len(threads),
+    }
+
+
 def _support_by_cluster(store, run_id: str) -> dict:
-    support = {}
-    for cluster in store.get_cluster_details(run_id):
-        threads = {
-            p.get("thread_url") or p.get("title") or p.get("source_permalink")
-            for p in cluster.get("pains", [])
-            if p.get("thread_url") or p.get("title") or p.get("source_permalink")
-        }
-        support[cluster["id"]] = {
-            "evidence_count": len(cluster.get("pains", [])),
-            "distinct_authors": int(cluster.get("distinct_authors") or 0),
-            "distinct_threads": len(threads),
-        }
-    return support
+    return {c["id"]: cluster_support(c) for c in store.get_cluster_details(run_id)}
 
 
-def _support_reasons(support: dict, thresholds: dict) -> list:
+def support_reasons(support: dict, thresholds: dict) -> list:
     reasons = []
     checks = (
         ("evidence_count", "insufficient_evidence"),
@@ -60,6 +67,9 @@ def rank_run(store, run_id: str, solvable_weights: dict = None, min_support: dic
         str(value).strip().lower() for value in allowed_solvability if str(value).strip()
     }
     support_map = _support_by_cluster(store, run_id) if min_support else {}
+    # A theme 7b never evaluated. Not a verdict, and NOT the same as "unknown" (asked, no
+    # answer): rank must not blame solvability for a theme it was never worth asking about.
+    not_evaluated = "not_evaluated"
     rows = store.conn.execute(
         # Warning tags now ride on soft_filters (stage 7 folded into 7b), so there is one
         # advisory row per theme. Warnings are advisory only - they never drop a theme;
@@ -92,14 +102,18 @@ def rank_run(store, run_id: str, solvable_weights: dict = None, min_support: dic
         # saturation is carried through for display only - see module docstring.
         base = demand * persistence
         support = support_map.get(r[0], {})
-        support_reasons = _support_reasons(support, min_support)
-        solvability_reasons = [] if allowed is None or solvable in allowed else [
-            "not_rankable_solvability"
-        ]
-        dropped = bool(r[4] or support_reasons or solvability_reasons)
+        support_gaps = support_reasons(support, min_support)
+        if solvable == not_evaluated and support_gaps:
+            # It failed support, which is WHY 7b skipped it. Report that, once.
+            solvability_reasons = []
+        else:
+            solvability_reasons = [] if allowed is None or solvable in allowed else [
+                "not_rankable_solvability"
+            ]
+        dropped = bool(r[4] or support_gaps or solvability_reasons)
         rank_score = 0.0 if dropped else round(base * sw, 2)
         reasons = json.loads(r[5] or "[]")
-        reasons.extend(support_reasons)
+        reasons.extend(support_gaps)
         reasons.extend(solvability_reasons)
         ranked.append({
             "cluster_id": r[0],

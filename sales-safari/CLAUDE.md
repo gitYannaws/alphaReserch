@@ -218,6 +218,16 @@ webapp/
   actually supplied to it; quotes are matched back against the input and dropped if they were
   paraphrased or invented. Briefs with no surviving quote are stored
   `has_review_evidence=0` and labelled *unproven* in the UI — never padded to look researched.
+- **Stage 7b must not pay to classify a theme that cannot rank** (`soft_filter.only_rankable`,
+  default true). On run `pbfamily0001` the pass spent **186 minutes** on all 8,925 themes at
+  ~1.25s each, and only 2,185 could clear rank's `min_support`. Restricting the LLM to that
+  rankable quarter costs ~46 minutes and loses **none** of the 856 themes that actually
+  ranked (checked against the stored rankings). A skipped theme still gets its row and its
+  free regex warnings; its verdict is `not_evaluated` — deliberately distinct from `unknown`
+  (asked, no answer) — and stage 9 does not add `not_rankable_solvability` on top of the
+  support gap that caused the skip. 7b and 9 share one rule via `s9_rank.cluster_support` /
+  `support_reasons`; two copies of that arithmetic would drift and silently lose an
+  opportunity rank would have accepted.
 - **Warning flags are advisory (stage 7b).** Flag caveats clearly without hiding the theme. They never drop a theme; `min_support` at rank is the only gate.
 - **Persistence is the real signal.** Complaints post-dating an incumbent's launch = incumbent is bad = opportunity. It is a property of the pain, scored in demand (stage 6), and is a rank multiplier. NOTE: currently a keyword proxy, not yet the true complaint-date-vs-launch test. Saturation is not the inverse of opportunity.
 - **Privacy.** Store `author_hash` (salted), never raw usernames. Treat raw markdown and verbatim spans as potentially identifying in exports.

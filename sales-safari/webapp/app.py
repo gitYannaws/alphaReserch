@@ -18,7 +18,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -27,6 +27,7 @@ from pipeline.discover import discover_reddit_thread_urls
 from pipeline.orchestrate import corpus_key_for_seed, load_config, normalize_seed, pick_collector
 from pipeline.retry import run_with_retry
 from pipeline.store import Store
+from pipeline.wordrank import ReiterableRows, rank_terms
 
 load_dotenv()
 
@@ -36,6 +37,7 @@ CFG = load_config(str(ROOT / "config.yaml"))
 DB = str(ROOT / CFG.get("db_path", "db/safari.sqlite"))
 INDEX = (BASE / "static" / "index.html").read_text(encoding="utf-8")
 SOURCES = (BASE / "static" / "sources.html").read_text(encoding="utf-8")
+FAVICON = (BASE / "static" / "favicon.svg").read_text(encoding="utf-8")
 APP_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 _RETRY = CFG.get("retry", {})
@@ -54,10 +56,16 @@ ACTIVE_RUN_STATUSES = {"starting", "collecting", "collecting-paused", "storing",
                        "competitor-discovery", "review-mining", "ranking", "ideating",
                        "briefing", "validating", "reporting", "stopping", "recovering"}
 
+# Pinned IDs, not aliases: a pin is reproducible, so a benchmark number stays attributable
+# to one model. The cost is that they go stale silently -- these sat on claude-sonnet-4-6
+# while config.yaml's `claude_model: sonnet` alias already resolved to claude-sonnet-5, so
+# the GUI dropdown ran a generation behind the CLI default without saying so. Re-check on
+# every model release.
 CLAUDE_EXTRACTOR_MODELS = {
-    "claude": "claude-sonnet-4-6",  # backward-compatible old UI value
-    "claude_sonnet": "claude-sonnet-4-6",
-    "claude_haiku": "claude-haiku-4-5-20251001",
+    "claude": "claude-sonnet-5",  # backward-compatible old UI value
+    "claude_sonnet": "claude-sonnet-5",
+    "claude_opus": "claude-opus-5",
+    "claude_haiku": "claude-haiku-4-5",
 }
 
 CODEX_EXTRACTOR_MODELS = {
@@ -80,13 +88,22 @@ def _extractor_options(run_cfg: dict) -> list[dict]:
     }
     options = []
     for key in (
-        "qwen", "qwen3", "claude_sonnet", "claude_haiku",
+        "qwen", "qwen3", "union_qwen_sonnet", "union_qwen3_sonnet",
+        "claude_sonnet", "claude_opus", "claude_haiku",
         "codex", "codex_gpt56_sol", "codex_gpt56_luna", "codex_gpt55",
         "codex_gpt54", "codex_gpt54_mini", "codex_spark", "glm",
     ):
+        if key in UNION_EXTRACTORS:
+            local, cloud = UNION_EXTRACTORS[key]
+            options.append({"value": key, "model": cloud,
+                            "label": f"UNION: {local[0]} + {cloud} (both run, pains pooled)"})
+            continue
         if key in CLAUDE_EXTRACTOR_MODELS:
             model = CLAUDE_EXTRACTOR_MODELS[key]
-            family = "Sonnet 4.6" if key == "claude_sonnet" else "Haiku 4.5"
+            # Derive the family label from the pinned id so a model bump cannot leave the
+            # dropdown announcing the wrong generation, the way the hardcoded
+            # "Sonnet 4.6" label did while the pin moved underneath it.
+            family = model.replace("claude-", "").replace("-", " ").title()
             detail = f"Claude {family} ({model})"
         elif key in CODEX_EXTRACTOR_MODELS:
             name, model = CODEX_EXTRACTOR_MODELS[key]
@@ -133,9 +150,22 @@ def _collector_to_toggles(collector: Optional[str]) -> tuple[bool, bool]:
     }.get((collector or "").lower(), (True, False))
 
 
+# Union choices run EVERY provider and pool their pains, instead of stopping at the first
+# that succeeds. The gold-set work measured complementary models lifting recall 32%->46% at
+# ~+1 false positive, which is exactly the second-opinion shape a benchmark wants -- but the
+# dropdown only ever exposed fallback, where the cloud model runs solely when the local one
+# errors. Cost note: every batch hits the cloud provider, not just the failing ones.
+UNION_EXTRACTORS = {
+    "union_qwen_sonnet": (["qwen", "claude"], "claude-sonnet-5"),
+    "union_qwen3_sonnet": (["qwen3", "claude"], "claude-sonnet-5"),
+}
+
+
 def _extractor_providers(name):
     """Map the GUI extractor choice to a provider try-list. Local models fall back to
     Claude if the local endpoint is down. None -> keep config default."""
+    if name in UNION_EXTRACTORS:
+        return list(UNION_EXTRACTORS[name][0])
     if name in ("qwen", "qwen3", "glm", "local"):
         return [name, "claude"]
     if name in CLAUDE_EXTRACTOR_MODELS:
@@ -151,6 +181,9 @@ def _apply_extractor_override(run_cfg: dict, extractor: Optional[str]) -> None:
         return
     run_cfg["extract"] = dict(run_cfg.get("extract", {}))
     run_cfg["extract"]["providers"] = providers
+    if extractor in UNION_EXTRACTORS:
+        run_cfg["extract"]["providers_mode"] = "union"
+        run_cfg["extract"]["claude_model"] = UNION_EXTRACTORS[extractor][1]
     if extractor in CLAUDE_EXTRACTOR_MODELS:
         run_cfg["extract"]["claude_model"] = CLAUDE_EXTRACTOR_MODELS[extractor]
     if extractor in CODEX_EXTRACTOR_MODELS:
@@ -412,7 +445,10 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
                                            progress=lambda d, t: _set_stage_progress(7, d, t, "themes"),
                                            batch_size=run_cfg.get("soft_filter", {}).get("batch_size", 40),
                                            max_batch_chars=run_cfg.get("soft_filter", {}).get("max_batch_chars", 8000),
-                                           enabled_filters=run_cfg.get("hard_filters", [])),
+                                           enabled_filters=run_cfg.get("hard_filters", []),
+                                           min_support=(run_cfg.get("rank", {}).get("min_support")
+                                                        if run_cfg.get("soft_filter", {}).get("only_rankable", True)
+                                                        else None)),
                     advisory=True)
         if sf is not None:
             job.update(solvable=sf.get("counts"), warned=sf.get("flagged"))
@@ -427,8 +463,16 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
     from pipeline.s9_rank import rank_run
     _rank_cfg = run_cfg.get("rank", {})
     _rank_w = _rank_cfg.get("solvable_weights")
+    # allowed_solvability was missing here while pipeline/analyze.py and pipeline/resume.py
+    # both passed it, so every run started from the GUI ranked with the solvability gate
+    # OFF. rank_run defaults the parameter to None, which it reads as "no gate configured"
+    # rather than "gate not wired", so nothing warned. Caught by the synthetic benchmark
+    # (run dd952fff8d8f): theme T09 was classified solvable=no with hard-filter reasons
+    # ["visa_immigration_process", "requires_in_person"] and still ranked #6 and became an
+    # idea. Three call sites, one config -- keep them in sync.
     ranked = _stage(job, "stage 9 rank",
                     lambda: rank_run(store, job_id, solvable_weights=_rank_w,
+                                     allowed_solvability=_rank_cfg.get("allowed_solvability"),
                                      min_support=_rank_cfg.get("min_support"),
                                      progress=lambda d, t: _set_stage_progress(9, d, t, "themes")))
     job.update(ranked=ranked["ranked"], dropped=ranked["dropped"])
@@ -772,6 +816,14 @@ def _discover_worker(did: str, topic: str, limit: int):
 @app.get("/", response_class=HTMLResponse)
 def index():
     return INDEX
+
+
+@app.get("/favicon.svg")
+def favicon():
+    """Served as a route, not inlined as a data: URI, so the mark lives in one file that
+    both pages point at. There is no StaticFiles mount to hang it off."""
+    return Response(FAVICON, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/subreddits")
@@ -1538,9 +1590,11 @@ def _startup_reconcile_runs():
 
 
 @app.get("/api/runs")
-def runs(limit: int = 25, offset: int = 0, q: str = "", status: str = ""):
+def runs(limit: int = 25, offset: int = 0, q: str = "", status: str = "",
+         sort: str = "", dir: str = "desc"):
     store = Store(DB)
-    items = store.list_runs(limit=limit, offset=offset, q=q, status=status)
+    items = store.list_runs(limit=limit, offset=offset, q=q, status=status,
+                            sort=sort, direction=dir)
     total = store.count_runs(q=q, status=status)
     store.close()
     return {"items": items, "total": total}
@@ -1608,31 +1662,82 @@ def docs(job_id: str, limit: int = 60):
     return out
 
 
+PAIN_PAGE_MAX = 1000
+
+
+def _csv(value: Optional[str]):
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
 @app.get("/api/run/{job_id}/pains")
-def pains(job_id: str, limit: int = 0):
-    """All pains for a run (limit<=0 = all), each tagged with its theme so the UI can
-    filter by persona/theme and link every comment to its source permalink."""
+def pains(job_id: str, limit: int = 300, offset: int = 0, q: str = "",
+          persona: str = "", theme: str = "", solvable: str = "",
+          types: str = "", clustered: str = "", sort: str = "", dir: str = "asc"):
+    """One filtered page of pains, plus how many rows the filter matched.
+
+    This used to return every row. Run pbfamily0001 has 74,849 of them: 41 MB of JSON,
+    parsed and held in the tab, before a single row was drawn. Search, the persona and
+    theme pickers and the four chips are all SQL now, so the browser holds one page.
+    """
     store = Store(DB)
-    sql = ("SELECT p.persona, p.complaint, p.workflow_pain, p.wish, p.verbatim_span, "
-           "COALESCE(p.source_permalink, p.source_id), p.span_start, p.span_end, "
-           "c.label, c.id, p.workaround, sf.solvable, p.persona_canonical "
-           "FROM pains p "
-           "LEFT JOIN cluster_members cm ON cm.pain_id=p.id "
-           "LEFT JOIN clusters c ON c.id=cm.cluster_id AND c.run_id=p.run_id "
-           "LEFT JOIN soft_filters sf ON sf.cluster_id=c.id AND sf.run_id=p.run_id "
-           "WHERE p.run_id=? AND COALESCE(p.verified,1)!=0")
-    params = [job_id]
-    if limit and limit > 0:
-        sql += " LIMIT ?"
-        params.append(limit)
-    rows = store.conn.execute(sql, params).fetchall()
+    filters = dict(q=q.strip() or None, persona=persona or None, theme=theme or None,
+                   solvable=_csv(solvable), types=_csv(types),
+                   clustered=clustered or None)
+    matched = store.count_pains_filtered(job_id, **filters)
+    rows = store.get_pain_page(job_id, limit=min(max(1, limit), PAIN_PAGE_MAX),
+                               offset=offset, sort=sort, direction=dir, **filters)
+    total = store.count_pains_filtered(job_id) if any(
+        v for v in filters.values()) else matched
     store.close()
-    return [{"persona": r[0], "complaint": r[1], "workflow_pain": r[2],
-             "wish": r[3], "span": r[4], "source": r[5],
-             "span_start": r[6], "span_end": r[7],
-             "theme": r[8], "cluster_id": r[9],
-             "workaround": r[10], "solvable": r[11],
-             "persona_canonical": r[12] or r[0]} for r in rows]
+    return {"rows": rows, "matched": matched, "total": total, "offset": offset}
+
+
+@app.get("/api/run/{job_id}/pain-facets")
+def pain_facets(job_id: str, limit: int = 300):
+    """Persona and theme pickers, without shipping every pain so the browser can group."""
+    store = Store(DB)
+    out = store.get_pain_facets(job_id, limit=min(max(1, limit), 2000))
+    store.close()
+    return out
+
+
+@app.get("/api/run/{job_id}/viz")
+def viz(job_id: str, themes: int = 400, personas: int = 15):
+    """Everything the three charts plot, in one call.
+
+    One endpoint, not three: the charts appear together, and three round trips would
+    show them popping in one at a time.
+    """
+    store = Store(DB)
+    summary = store.get_sentiment_summary(job_id)
+    out = {"themes": store.get_viz_themes(job_id, limit=min(max(1, themes), 2000)),
+           "timeline": store.get_pain_timeline(job_id),
+           "personas": store.get_top_personas(job_id, limit=min(max(1, personas), 50)),
+           "sentiment": {"summary": summary,
+                         "examples": {s["stance"]: store.get_sentiment_examples(job_id, s["stance"])
+                                      for s in summary}},
+           "ideas": store.get_idea_strength(job_id)}
+    store.close()
+    return out
+
+
+# run_id -> ranked terms. The scan is ~10 s over 75k pains and the pains of a finished run
+# never change, so recomputing it on every tab open would be pure waste.
+_WORDRANK_CACHE: dict = {}
+
+
+@app.get("/api/run/{job_id}/word-ranking")
+def word_ranking(job_id: str, limit: int = 200, min_pains: int = 15, refresh: int = 0):
+    """Words and two-word phrases ranked by how many DIFFERENT authors used them."""
+    key = (job_id, limit, min_pains)
+    if not refresh and key in _WORDRANK_CACHE:
+        return _WORDRANK_CACHE[key]
+    store = Store(DB)
+    rows = ReiterableRows(lambda: store.iter_pain_terms_source(job_id))
+    out = rank_terms(rows, min_pains=max(1, min_pains), limit=max(1, limit))
+    store.close()
+    _WORDRANK_CACHE[key] = out
+    return out
 
 
 @app.get("/api/run/{job_id}/clusters")
@@ -1643,12 +1748,22 @@ def clusters(job_id: str):
     return out
 
 
+CLUSTER_DETAIL_MAX = 300
+
+
 @app.get("/api/run/{job_id}/cluster-details")
-def cluster_details(job_id: str):
-    """Each theme with its member pains (persona, text, source permalink) — powers the
-    per-theme evidence/source list under the ranked themes."""
+def cluster_details(job_id: str, ids: str = ""):
+    """Themes with their member pains — the evidence list under each ranked theme.
+
+    `ids` is required in practice: all 8,925 themes of pbfamily0001 serialise to 22.8 MB.
+    The UI asks only for the rows it is about to draw. Omitting `ids` still returns the
+    whole run, because the report and idea stages read it that way.
+    """
+    want = _csv(ids)
+    if len(want) > CLUSTER_DETAIL_MAX:
+        want = want[:CLUSTER_DETAIL_MAX]
     store = Store(DB)
-    out = store.get_cluster_details(job_id)
+    out = store.get_cluster_details(job_id, cluster_ids=want or None)
     store.close()
     return out
 

@@ -15,7 +15,7 @@ from pipeline import cluster
 from pipeline.s10_ideas import _idea_for
 from pipeline.s7_filters import evaluate_cluster
 from pipeline.s7b_softfilter import softfilter_run
-from pipeline.s9_rank import _support_reasons
+from pipeline.s9_rank import support_reasons
 
 
 class _ExtractStore:
@@ -231,7 +231,7 @@ class QualityGateTests(unittest.TestCase):
         self.assertEqual(len(store.saved), 5)
 
     def test_support_reasons_name_each_failed_threshold(self):
-        reasons = _support_reasons(
+        reasons = support_reasons(
             {"evidence_count": 4, "distinct_authors": 2, "distinct_threads": 1},
             {"evidence_count": 5, "distinct_authors": 4, "distinct_threads": 3},
         )

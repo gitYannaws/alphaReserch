@@ -13,6 +13,7 @@ import json
 
 from .extract import _call_extractor, _parse_json_array
 from .s7_filters import evaluate_cluster
+from .s9_rank import cluster_support, support_reasons
 
 VALID = {"yes", "partial", "no"}
 DEFAULT_BATCH_SIZE = 40
@@ -88,12 +89,23 @@ def _chunks(items: list, size: int, max_batch_chars: int = DEFAULT_MAX_BATCH_CHA
 
 def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
                    batch_size: int = DEFAULT_BATCH_SIZE, enabled_filters=None,
-                   max_batch_chars: int = DEFAULT_MAX_BATCH_CHARS) -> dict:
+                   max_batch_chars: int = DEFAULT_MAX_BATCH_CHARS,
+                   min_support: dict = None) -> dict:
     """One advisory pass per theme: software-fit (LLM) + warning tags (regex).
 
     The old stage 7 was folded in here - it was pure regex (free) over the same clusters, so
     running it as a separate stage bought nothing. A theme that classifies but whose LLM
     verdict is missing still gets its warnings recorded.
+
+    `min_support` (stage 9's own thresholds) skips the LLM call for themes that can never
+    rank. Most themes cannot: on run pbfamily0001 only 2,185 of 8,925 cleared the bar, and
+    this pass spent 186 minutes classifying all of them at ~1.25 s each. Restricting it to
+    the rankable quarter costs about 46 minutes and, measured against that run's results,
+    loses NONE of the 856 themes that ranked. Pass None to classify everything.
+
+    A skipped theme still gets its row and its free regex warnings; its verdict is
+    `not_evaluated`, which is distinct from `unknown` (asked, no answer) so the audit can
+    tell "we did not ask" from "the model would not say".
     """
     clusters = store.get_cluster_details(run_id)
     store.clear_soft_filters(run_id)
@@ -106,7 +118,16 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
 
     if progress:
         progress(0, len(clusters))
-    payload = [_theme_payload(c) for c in clusters]
+    if min_support:
+        rankable = {c["id"] for c in clusters
+                    if not support_reasons(cluster_support(c), min_support)}
+    else:
+        rankable = {c["id"] for c in clusters}
+    skipped = len(clusters) - len(rankable)
+    if skipped:
+        print(f"  softfilter: classifying {len(rankable)} rankable themes, "
+              f"skipping {skipped} that cannot clear min_support")
+    payload = [_theme_payload(c) for c in clusters if c["id"] in rankable]
     items = {}
     for batch in _chunks(payload, batch_size, max_batch_chars):
         prompt = PROMPT_HEADER + json.dumps(batch, ensure_ascii=False)
@@ -134,6 +155,11 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
             solvable, conf, reason = _coerce(it)
             counts[solvable] = counts.get(solvable, 0) + 1
             classified += 1
+        elif cluster["id"] not in rankable:
+            # Never asked: it cannot clear min_support, so a verdict would change nothing.
+            # Say that, rather than let it read as a model that declined to answer.
+            solvable, conf, reason = "not_evaluated", 0.0, "below min_support; not evaluated"
+            counts["not_evaluated"] = counts.get("not_evaluated", 0) + 1
         else:
             # LLM had no verdict for this theme: keep the row so warnings are not lost.
             solvable, conf, reason = "unknown", 0.0, ""
@@ -143,7 +169,7 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
 
     store.set_stage(run_id, 7, "soft-filtered")
     return {"checked": len(clusters), "classified": classified, "counts": counts,
-            "flagged": flagged}
+            "flagged": flagged, "skipped_unrankable": skipped}
 
 
 if __name__ == "__main__":
