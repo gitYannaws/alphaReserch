@@ -99,5 +99,50 @@ class RestartPolicyTests(unittest.TestCase):
         self.assertLessEqual(guard.MAX_RESTARTS_PER_HOUR, 6)
 
 
+class MaintenanceLockTests(unittest.TestCase):
+    """A terminal status is not enough to work on a finished run by hand.
+
+    The stages write a non-terminal status the moment they start. Re-running the idea chain
+    against pbfamily0001 set `ideas_generated`, then `competitors-found`, and the guard --
+    correctly, by its own rule -- relaunched the whole pipeline `--from 3` on the next tick.
+    Three times in twenty minutes, each collision killing the work with "database is locked".
+    The last one threw away a 279-second Claude call.
+    """
+
+    def test_the_marker_lives_beside_the_stop_file(self):
+        path = guard.maintenance_file(JOB)
+        self.assertEqual(path.name, "resume-%s.maintenance" % JOB)
+        self.assertEqual(path.parent.name, "db")
+
+    @staticmethod
+    def _db():
+        """main() asks two questions of the DB: the run row, then the progress row."""
+        conn = mock.Mock()
+        conn.execute.side_effect = lambda sql, params: mock.Mock(
+            fetchone=mock.Mock(return_value=(10, "ideating") if "from runs" in sql
+                               else (75, 75)))
+        return conn
+
+    def _main(self, marker_exists):
+        with mock.patch.object(guard.Path, "exists", lambda self: marker_exists), \
+             mock.patch.object(guard, "process_alive", return_value=False) as alive, \
+             mock.patch.object(guard, "recent_restarts", return_value=0), \
+             mock.patch.object(guard, "log"), \
+             mock.patch.object(guard.sqlite3, "connect", return_value=self._db()), \
+             mock.patch.object(guard.sys, "argv", ["guard", JOB, TASK]), \
+             mock.patch.object(guard.subprocess, "run") as run:
+            guard.main()
+        return run, alive
+
+    def test_the_guard_stands_down_while_the_marker_exists(self):
+        run, alive = self._main(marker_exists=True)
+        run.assert_not_called()
+        alive.assert_not_called()
+
+    def test_without_the_marker_a_dead_run_is_still_restarted(self):
+        run, _alive = self._main(marker_exists=False)
+        run.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

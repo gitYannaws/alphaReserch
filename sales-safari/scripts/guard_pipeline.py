@@ -28,6 +28,24 @@ MAX_RESTARTS_PER_HOUR = 4
 TERMINAL = {"done", "reported", "cancelled"}
 
 
+def maintenance_file(job_id):
+    """`db/resume-<job>.maintenance` - hands-off marker, same convention as `.stop`.
+
+    A terminal status is NOT enough to work on a finished run by hand. The stages themselves
+    write a non-terminal status the moment they start: re-running the idea chain against
+    pbfamily0001 set `ideas_generated`, then `competitors-found`, and the guard - correctly,
+    by its own rule - relaunched the whole pipeline `--from 3` on the next tick. It happened
+    three times in twenty minutes (14:31, 14:41, 14:51), each time colliding with the work in
+    progress on one SQLite file and killing it with "database is locked". The last collision
+    threw away a 279-second Claude call.
+
+    Parking the status before starting cannot work, because stage 10a un-parks it. So say it
+    out of band instead: while this file exists, the run is being worked on and the guard
+    keeps its hands off, whatever the status says.
+    """
+    return ROOT / "db" / ("resume-%s.maintenance" % job_id)
+
+
 def log(msg):
     GUARD_LOG.parent.mkdir(exist_ok=True)
     line = "%s  %s" % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), msg)
@@ -169,6 +187,15 @@ def main():
         return
     stage, status = row
     if status in TERMINAL:
+        return
+    marker = maintenance_file(job_id)
+    if marker.exists():
+        try:
+            why = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            why = ""
+        log("%s is under maintenance%s; not restarting"
+            % (job_id, (" (%s)" % why) if why else ""))
         return
     if process_alive(job_id, task_name):
         return
