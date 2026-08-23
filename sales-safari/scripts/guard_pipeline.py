@@ -36,37 +36,108 @@ def log(msg):
     print(line)
 
 
-def process_alive(job_id):
-    r"""True when a resume runner for this job is running. Command line, not a pidfile:
-    a stale pidfile outlives a killed process and would make the guard sit idle forever.
+def _ps(script):
+    """Run one PowerShell expression and return its stdout, or None if it failed."""
+    proc = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                          capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else None
 
-    The match MUST happen inside PowerShell. Piping CommandLine strings back to stdout runs
-    them through the console formatter, which TRUNCATES each line at the host buffer width
-    -- 70 columns here. A resume command line is ~105 characters, so what reached Python was
-    "...\.venv\Scripts\python.exe -", with `pipeline.resume` and the job id cut clean off.
-    process_alive() therefore returned False for a perfectly healthy runner, every time.
 
-    Run pbfamily0001 paid for that: the guard restarted it every 10 minutes for six hours on
-    2026-08-21, piling concurrent runners onto one SQLite file. Stage 5 sat at 2/3 from
-    10:51 to 13:41 and stage 7 restarted 10 times, each one resetting soft-filter progress
-    to 0/8925. Returning a COUNT keeps the formatter out of it -- an integer cannot wrap.
+def _task_is_running(task_name):
+    """Ask the Scheduled Task itself. This is the ONLY authoritative source here."""
+    if not task_name.replace("-", "").replace("_", "").isalnum():
+        return None
+    out = _ps("(Get-ScheduledTask -TaskName '%s' -ErrorAction SilentlyContinue).State"
+              % task_name)
+    if out is None:
+        return None
+    state = out.strip().lower()
+    return state == "running" if state else None
+
+
+def _pidfile_alive(job_id):
+    """The runner writes its own PID. Readable even when its command line is not."""
+    pidfile = ROOT / "db" / ("resume-%s.pid" % job_id)
+    try:
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    out = _ps("@(Get-Process -Id %d -ErrorAction SilentlyContinue).Count" % pid)
+    if out is None:
+        return None
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return None
+
+
+def _any_unreadable_python():
+    """True when a python process exists whose command line this session cannot read.
+
+    Then we cannot prove the runner is dead, and must not act as if we can.
+    """
+    out = _ps("@(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+              "Where-Object { -not $_.CommandLine }).Count")
+    if out is None:
+        return True
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return True
+
+
+def process_alive(job_id, task_name=None):
+    r"""True when a resume runner for this job is running -- or might be.
+
+    This check has now been wrong twice, in two different ways, and both cost real hours.
+
+    First it piped Win32_Process CommandLine strings back to Python. PowerShell runs those
+    through the console formatter, which TRUNCATES at the host buffer width (70 columns
+    here), so a ~105-character resume command line arrived as
+    "...\.venv\Scripts\python.exe -" with `pipeline.resume` and the job id cut clean off.
+    Every healthy runner read as dead, and pbfamily0001 was restarted every 10 minutes for
+    six hours on 2026-08-21, stacking runners onto one SQLite file.
+
+    Matching inside PowerShell fixed the truncation and did NOT fix the check. On
+    2026-08-23 the Scheduled Task's own processes came back with a NULL CommandLine -- not
+    readable from this session at all -- so `-like` matched nothing, the count was 0, and the
+    guard restarted a live runner again. Two runners, "database is locked", a 199-second
+    Claude call lost.
+
+    The lesson both times: this function must never infer "dead" from "I could not see it".
+    So it asks, in order, and takes the first source that answers:
+
+      1. the Scheduled Task's own State  -- authoritative, and readable
+      2. the runner's pidfile            -- written by the runner, readable
+      3. a command-line match            -- the original method, kept as a backstop
+      4. any python process this session cannot read -- cannot rule it out, so ALIVE
     """
     if not job_id.replace("-", "").replace("_", "").isalnum():
         raise ValueError("job_id must be alphanumeric (it is interpolated into PowerShell)")
-    script = (
-        "@(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-        "Where-Object { $_.CommandLine -like '*pipeline.resume*' -and "
-        "$_.CommandLine -like '*%s*' }).Count" % job_id
-    )
-    proc = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                          capture_output=True, text=True)
-    try:
-        return int((proc.stdout or "0").strip()) > 0
-    except ValueError:
-        # Never guess. A guard that reads "unknown" as "dead" is what caused the thrash.
-        log("process check failed for %s (%r); assuming ALIVE and not restarting"
-            % (job_id, (proc.stderr or proc.stdout or "")[:120].strip()))
+
+    if task_name:
+        running = _task_is_running(task_name)
+        if running is not None:
+            return running
+
+    by_pid = _pidfile_alive(job_id)
+    if by_pid:
         return True
+
+    out = _ps("@(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+              "Where-Object { $_.CommandLine -like '*pipeline.resume*' -and "
+              "$_.CommandLine -like '*%s*' }).Count" % job_id)
+    if out is not None:
+        try:
+            if int(out.strip()) > 0:
+                return True
+        except ValueError:
+            pass
+
+    if _any_unreadable_python():
+        log("cannot read every python command line for %s; assuming ALIVE" % job_id)
+        return True
+    return False
 
 
 def recent_restarts():
@@ -99,7 +170,7 @@ def main():
     stage, status = row
     if status in TERMINAL:
         return
-    if process_alive(job_id):
+    if process_alive(job_id, task_name):
         return
 
     n = recent_restarts()

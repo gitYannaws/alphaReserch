@@ -218,7 +218,7 @@ webapp/
   now returns `llm_error` (set on an exception AND on an empty answer), `resume.Runner`
   logs `WARN ... DEGRADED`, and a run that ends on any fallback path repeats it as
   `NOTIFY INCOMPLETE`. Never let a stub answer look like work.
-- **The guard's liveness check must not read process command lines over stdout.** PowerShell
+- **The guard must never infer "dead" from "I could not see it."** PowerShell
   runs them through the console formatter, which TRUNCATES at the host buffer width (70 cols
   here) — a ~105-char resume command line arrived as `...\.venv\Scripts\python.exe -`, with
   `pipeline.resume` and the job id cut off, so `process_alive()` said False for a healthy
@@ -227,7 +227,14 @@ webapp/
   RESTARTED at 09:21/09:41/09:51 while extraction progress climbed 176,425 → 177,760 docs
   between them. Stage 5 sat at 2/3 for ~3 hours and stage 7 restarted 10 times, each reset
   zeroing soft-filter progress. Do the matching INSIDE PowerShell and return a COUNT — an
-  integer cannot be truncated. An unreadable process check now means ALIVE, never dead.
+  integer cannot be truncated. That fixed the truncation and did NOT fix the check: on
+  2026-08-23 the Scheduled Task's own processes came back with a **NULL CommandLine** — not
+  readable from that session at all — so `-like` matched nothing, the count was 0, and the
+  guard restarted a live runner again. Two runners, `database is locked`, a 199-second Claude
+  call lost. `process_alive` now asks in order and takes the first source that answers: the
+  Scheduled Task's own `State`, then the runner's pidfile, then the command-line match, and
+  finally — if any python process has a command line this session cannot read — ALIVE,
+  because nothing has ruled the runner out. Every unknown resolves to ALIVE.
 - **An idea is never a refusal.** Stage 10a returns `{"skip":true,"reason"}` for a theme it
   cannot honestly build a product from, and backfills from further down the ranking. Run
   `9af5b27db46e` shipped 3 of 5 ideas titled "Software-adjacent only: not a product-shaped
