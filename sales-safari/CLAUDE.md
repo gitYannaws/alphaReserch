@@ -214,6 +214,19 @@ webapp/
   cannot honestly build a product from, and backfills from further down the ranking. Run
   `9af5b27db46e` shipped 3 of 5 ideas titled "Software-adjacent only: not a product-shaped
   pain".
+- **The quote gate tests CONTAINMENT, not equality.** It exists to stop *invented* quotes.
+  Testing whole-string equality against the review body enforced a different, much harsher
+  rule — quote the ENTIRE review or be discarded. Bodies on `pbfamily0001` ran a median of
+  125 chars and 521 at p90, so a model excerpting the damning sentence (exactly what a wedge
+  should cite) failed every time: **1 of 21 briefs** carried evidence out of 188 mined
+  reviews, and the lone survivor was a 128-char review short enough to echo whole. A
+  contiguous substring is still verbatim and still un-inventable, which is the only property
+  that matters; `MIN_QUOTE_CHARS = 25` stops a stock phrase matching by chance. The PROMPT
+  must agree with the gate — it still said "copied character-for-character" with a wide `or
+  ""` escape, and a cautious model answered "" for every incumbent (measured: 0 quotes).
+  Saying an excerpt is welcome took it to **7 quotes across 5 briefs**, i.e. 5 of the 6
+  briefs that had any reviews to quote. The other 6 have web-only competitors with no App
+  Store presence and are honestly unprovable.
 - **A wedge without a quote is a hypothesis.** Stage 10b may only cite review text that was
   actually supplied to it; quotes are matched back against the input and dropped if they were
   paraphrased or invented. Briefs with no surviving quote are stored

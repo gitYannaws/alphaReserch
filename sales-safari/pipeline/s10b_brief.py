@@ -49,8 +49,14 @@ FIELDS:
   If neither supports a real gap, say plainly that the gap is unproven and name what you
   would need to check. Never invent a weakness.
 - "incumbents": array of {name, fails_at, quote}. One entry per competitor that matters.
-  "fails_at" = one clause on where it falls short. "quote" = the EXACT text of one supplied
-  review that shows it, copied character-for-character, or "" if no supplied review shows it.
+  "fails_at" = one clause on where it falls short.
+  "quote" = an EXCERPT copied out of ONE supplied review, character-for-character. Copy the
+  single sentence or clause that shows the failure - you do NOT need to copy the whole
+  review, and a shorter exact excerpt is better than a long one. It must be at least 25
+  characters, and it must be one CONTIGUOUS run of text from ONE review: do not paraphrase,
+  do not tidy the spelling, do not stitch two reviews together, do not add "...".
+  When that competitor has reviews in the input, you should normally be able to quote one.
+  Use "" ONLY when none of its supplied reviews speak to `fails_at`, or it has none.
   NEVER write a quote that was not in the input.
 - "mvp": array of 3-5 strings. The smallest first version, each a concrete buildable feature.
   Order by build sequence. No "AI-powered" hand-waving - say what it actually does.
@@ -66,6 +72,38 @@ IDEAS:
 
 def _norm(s: str) -> str:
     return " ".join(str(s or "").split()).lower()
+
+
+# A quote must be long enough that matching it inside a review proves it came from there.
+# Same reasoning as the stage-3a span floor: "bad app" appears in half the corpus by chance.
+MIN_QUOTE_CHARS = 25
+
+
+def _match_supplied(quote: str, quote_index: dict):
+    """Find the supplied review a quote was taken from, whole OR in part.
+
+    The gate exists to stop INVENTED quotes, and it used to test whole-string equality
+    against the review body. That is a different, much harsher rule: quote the entire
+    review or be discarded. Review bodies here run a median of 125 characters and 521 at
+    the 90th percentile, so a model excerpting the damning sentence -- exactly what a wedge
+    should cite -- failed the check every time. On run pbfamily0001 that left 1 of 21
+    briefs marked `has_review_evidence` out of 188 mined reviews; the single survivor was a
+    128-character review short enough to echo whole.
+
+    A contiguous substring of a supplied body is still verbatim and still un-inventable,
+    which is the property that matters. Same idiom as `extract._span_bounds`: containment,
+    not equality. Returns the matched review's metadata, or None.
+    """
+    needle = _norm(quote)
+    if len(needle) < MIN_QUOTE_CHARS:
+        return None
+    hit = quote_index.get(needle)
+    if hit:
+        return hit
+    for body, meta in quote_index.items():
+        if needle in body:
+            return meta
+    return None
 
 
 def _idea_payload(store, run_id: str, idea: dict, cluster: dict,
@@ -130,7 +168,11 @@ def _quote_index(store, run_id: str, cluster_id: str) -> dict:
 def _clean_incumbents(raw, supplied: set, quote_index: dict) -> tuple[list, int]:
     """Keep only quotes that were actually supplied to the model. A paraphrased or invented
     quote is silently dropped - the incumbent entry survives without it, so we lose the
-    citation rather than publishing a fake one."""
+    citation rather than publishing a fake one.
+
+    `supplied` is retained for callers but the match now runs against `quote_index`, which
+    holds the same bodies plus the citation metadata. See `_match_supplied`.
+    """
     out, kept_quotes = [], 0
     for item in (raw or [])[:6]:
         if not isinstance(item, dict):
@@ -139,9 +181,9 @@ def _clean_incumbents(raw, supplied: set, quote_index: dict) -> tuple[list, int]
         if not name:
             continue
         quote = " ".join(str(item.get("quote") or "").split())[:400]
-        meta = quote_index.get(_norm(quote)) if quote else None
-        if quote and _norm(quote) not in supplied:
-            quote, meta = "", None  # not ours - drop it
+        meta = _match_supplied(quote, quote_index) if quote else None
+        if not meta:
+            quote = ""  # invented, paraphrased, or too short to prove - drop it
         if quote:
             kept_quotes += 1
         out.append({
