@@ -19,19 +19,48 @@ import re
 # produces, so real differences spread across the range rather than piling up at the cap.
 DEFAULT_FULL_SCORE_AT = {"voices": 25, "threads": 12, "months": 36}
 
+# Every list below was rebuilt from term frequencies measured over run pbfamily0001's 72,610
+# pain texts. The originals were written for a maker / B2B-SaaS niche and never adapted, and
+# it showed: 8 of 12 REACHABILITY terms ("makerspace", "etsy", "seller", "hobbyist") fired
+# fewer than 50 times in the ENTIRE corpus, and 7 of 18 WTP terms ("invoice", "refund",
+# "pricing") were equally dead. `willingness_to_pay` never moved off its base on 90% of
+# themes and `pain_intensity` never moved on 68%.
 INTENSITY_TERMS = {
+    # kept: measured live in this corpus (can't 1,945 / hard 1,820 / hate 1,597)
     "can't", "cannot", "impossible", "frustrating", "frustrated", "hate",
-    "broken", "stuck", "waste", "wasting", "manual", "tedious", "pain",
-    "annoying", "problem", "issue", "hard", "difficult", "slow",
+    "broken", "stuck", "waste", "wasting", "pain", "annoying", "problem",
+    "issue", "hard", "difficult", "slow",
+    # added: how people in THIS corpus say a thing hurts
+    "tired of", "sick of", "desperate", "struggle", "struggling", "worst",
+    "miserable", "terrible", "awful", "garbage", "trash", "ridiculous",
+    "nightmare", "give up", "gave up", "useless", "hopeless",
+    # dropped "manual" and "tedious": B2B workflow words, under 50 hits in 72,610 texts
 }
-WTP_TERMS = {
-    "pay", "paid", "paying", "price", "pricing", "cost", "costs", "expensive",
-    "subscription", "fee", "fees", "buy", "bought", "purchased", "purchase",
-    "budget", "invoice", "refund",
+
+# WTP is TIERED, because a flat keyword bag measured the wrong thing. "expensive" fires the
+# same on an expensive dating subscription and on expensive drinks, and the flat version put
+# "Expensive dates" at rank 1 and "Overpriced items" at rank 6 off exactly that confusion.
+# Strong terms are money changing hands FOR A PRODUCT OR SERVICE, or a verdict on whether it
+# was worth paying. Weak terms are generic spending, which is context, not demand.
+WTP_STRONG_TERMS = {
+    "pay for", "paying for", "paid for", "premium", "subscription", "subscriptions",
+    "would pay", "worth paying", "happy to pay", "worth it", "not worth",
+    "overpriced", "rip off", "waste of money", "wasted money", "paywall",
+    "free trial", "scam",
 }
+WTP_WEAK_TERMS = {
+    "pay", "paid", "paying", "price", "cost", "costs", "expensive", "cheap",
+    "afford", "money", "budget", "buy", "bought", "fee", "fees", "dollars",
+}
+
+# Reachability = can we FIND these buyers and speak to them? In a forum corpus that means
+# they name where they gather or which product they already use. The old list asked about
+# Etsy sellers and makerspaces, which do not exist here.
 REACHABILITY_TERMS = {
-    "forum", "community", "makerspace", "shop", "etsy", "client",
-    "customer", "seller", "business", "hobbyist", "beginner", "class",
+    "community", "forum", "forums", "sub", "subreddit", "group", "groups",
+    "discord", "telegram", "expat", "expats", "nomad", "nomads", "meetup",
+    "app", "apps", "tinder", "bumble", "hinge", "instagram", "youtube",
+    "course", "class", "business",
 }
 # Persistence: does the pain keep recurring despite attempts? A pain signal about the pain
 # itself (not competitors), so it lives here in demand, not in the competition stage. Still a
@@ -83,6 +112,19 @@ def _term_hits(text: str, terms: set) -> list:
 def _term_score(text: str, terms: set, base: float = 2.0) -> tuple[float, list]:
     hits = _term_hits(text, terms)
     return min(10.0, base + len(hits) * 1.5), hits
+
+
+def _wtp_score(text: str) -> tuple[float, list]:
+    """Willingness to pay, weighting proof of payment above mentions of money.
+
+    A theme saying "expensive" alone now scores 1.6. A theme saying "paying for", "premium"
+    and "not worth" scores 8.5. Before, both were flat keyword counts and the corpus's
+    ordinary travel spending outranked evidence that anyone pays for software.
+    """
+    strong = _term_hits(text, WTP_STRONG_TERMS)
+    weak = _term_hits(text, WTP_WEAK_TERMS)
+    score = min(10.0, 1.0 + 2.5 * len(strong) + 0.6 * len(weak))
+    return round(score, 2), strong + weak
 
 
 def _endorsement(cluster: dict, cap: float = 3.0) -> tuple[float, dict]:
@@ -247,7 +289,7 @@ def score_cluster(cluster: dict, weights: dict, corpus_latest=None,
               + 0.5 * max(0, evidence_count - distinct_authors)
               + endorsement)
     frequency = round(_log_scale(voices, full_at["voices"]), 2)
-    willingness_to_pay, wtp_hits = _term_score(text, WTP_TERMS, base=1.0)
+    willingness_to_pay, wtp_hits = _wtp_score(text)
     reachability, reach_hits = _term_score(text, REACHABILITY_TERMS, base=2.0)
     if evidence_count:
         reachability = min(10.0, reachability + (post_level / evidence_count) * 2.0)
