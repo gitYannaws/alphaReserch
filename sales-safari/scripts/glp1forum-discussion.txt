@@ -1,0 +1,33 @@
+# glp1forum.com discussion subforums (vendor-specific boards excluded).
+# Thread counts as of 2026-07-29.
+https://glp1forum.com/forums/public/            # Public Square - 2.5K threads / 57.9K posts
+https://glp1forum.com/forums/peptides/          # Other Peptides / Blends / Stacking - 938 / 15.9K
+https://glp1forum.com/forums/rt/                # Retatrutide - 676 / 15.5K
+https://glp1forum.com/forums/vendors/           # Marketplace Vendors - 524 / 5.6K
+https://glp1forum.com/forums/tz/                # Tirzepatide (Mounjaro, Zepbound) - 504 / 10.4K
+https://glp1forum.com/forums/weightloss/        # Weight Loss - 408 / 9.3K
+https://glp1forum.com/forums/supplies/          # Supplies & Accessories - 372 / 8.8K
+https://glp1forum.com/forums/news/              # In the News - 349 / 6.4K
+https://glp1forum.com/forums/offtopic/          # Off-Topic - 256 / 5.1K
+https://glp1forum.com/forums/fitness/           # Fitness & Nutrition - 153 / 4.3K
+https://glp1forum.com/forums/crypto/            # Crypto Corner - 119 / 2.3K
+https://glp1forum.com/forums/research/          # Research Chemicals & Sourcing - 106 / 6.2K
+https://glp1forum.com/forums/condititions/      # Chronic Conditions, Diabetes, PCOS - 96 / 1.5K
+https://glp1forum.com/forums/heardof/           # Has anybody heard of ...? - 86 / 1.3K
+https://glp1forum.com/forums/hrt/               # Hormone/AAS Therapies & GLP-1s - 66 / 2.5K
+https://glp1forum.com/forums/reviews/           # Vendor Reviews - 62 / 438
+https://glp1forum.com/forums/sg/                # Semaglutide (Ozempic, Wegovy) - 61 / 922
+https://glp1forum.com/forums/cg/                # Cagrilintide & Cagri/Sema - 60 / 1.8K
+https://glp1forum.com/forums/cafe/              # Continental Cafe - 52 / 2.2K
+https://glp1forum.com/forums/tests/             # Lab Testing Results/Reports - 31 / 424
+https://glp1forum.com/forums/testing/           # Lab Testing Discussion - 30 / 303
+https://glp1forum.com/forums/providers/         # Telehealth/Medspa/Compounding - 22 / 395
+https://glp1forum.com/forums/scams/             # SCAM Spotlight - 20 / 389
+https://glp1forum.com/forums/sv/                # Survodutide - 19 / 477
+https://glp1forum.com/forums/eloralintide/      # Eloralintide - 19 / 864
+https://glp1forum.com/forums/teso/              # Tesofensine - 13 / 263
+https://glp1forum.com/forums/mz/                # Mazdutide - 11 / 191
+https://glp1forum.com/forums/grouptesting/      # Group Testing - 8 / 29
+https://glp1forum.com/forums/or/                # Orforglipron (Foundayo) - 6 / 257
+https://glp1forum.com/forums/lg/                # Liraglutide (Victoza, Saxenda) - 3 / 63
+https://glp1forum.com/forums/dg/                # Dulaglutide (Trulicity) - 1 / 8

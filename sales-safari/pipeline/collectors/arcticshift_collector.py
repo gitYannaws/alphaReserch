@@ -39,9 +39,26 @@ from urllib.parse import urlparse
 import requests
 
 from .base import Collector, Document
+from ..rate_limit import AdaptiveRateLimiter
 
 API_BASE = "https://arctic-shift.photon-reddit.com"
 UA = {"User-Agent": "sales-safari/1.0 (market research; pain mining)"}
+
+
+def _is_throttle(resp) -> bool:
+    """Is this response the archive asking us to slow down?
+
+    429 is the obvious one. 422 is NOT generally a throttle - it is also how the API
+    reports a genuinely malformed query - so it only counts when the body says so
+    ("Timeout. Maybe slow down a bit"). Matching on the body keeps a real validation
+    error loud instead of silently retrying a request that will never succeed.
+    """
+    if resp.status_code == 429:
+        return True
+    if resp.status_code == 422:
+        body = (resp.text or "").lower()
+        return "slow down" in body or "timeout" in body
+    return False
 _DELETED = {"[deleted]", "[removed]", "", None}
 
 
@@ -86,6 +103,19 @@ class ArcticShiftCollector(Collector):
         self.api_base = (api_base or API_BASE).rstrip("/")
         self.page_size = max(1, min(100, int(page_size or 100)))  # API caps limit at 100
         self.pause = pause
+        # Adaptive pacing, same AdaptiveRateLimiter the xenforo/playwright collectors
+        # use. This collector previously slept a FIXED `pause` between pages and had no
+        # way to slow down, so a long sweep walked straight into the archive's limiter
+        # and died: a 72k-document r/ExpatFIRE backfill ended on
+        # `HTTP 422 {"error":"Timeout. Maybe slow down a bit"}` the moment it moved from
+        # the posts sweep to the (much larger) comments sweep. The limiter multiplies
+        # the delay on every throttle signal and decays it back after successes, so one
+        # slow patch no longer ends the run and a healthy sweep still paces at `pause`.
+        self.limiter = AdaptiveRateLimiter(
+            min_delay=pause, max_delay=pause * 1.5,
+            backoff=1.8, max_multiplier=12.0,
+            retries=4, cooldown_seconds=5.0,
+        )
         self.timeout = timeout
         self.min_comment_len = min_comment_len
         self.min_post_len = min_post_len
@@ -139,32 +169,54 @@ class ArcticShiftCollector(Collector):
         )
 
     # ---- API mode ----
+    @staticmethod
+    def _throttle_check(resp) -> bool:
+        return _is_throttle(resp)
+
     def _get_page(self, kind: str, sub: str, after: int) -> List[dict]:
         # The live API 400s on after=0 ("'after' must be a valid date"); the first page
         # simply omits the cursor.
         cursor = f"&after={after}" if after > 0 else ""
         url = (f"{self.api_base}/api/{kind}/search"
                f"?subreddit={sub}&limit={self.page_size}&sort=asc{cursor}")
-        for attempt in range(4):
+        for attempt in range(5):
             try:
                 resp = requests.get(url, headers=UA, timeout=self.timeout)
             except requests.exceptions.RequestException as e:
                 raise ArcticShiftError(f"arctic shift connection error: {e}")
-            if resp.status_code == 429:
-                # Their docs promise headroom at a couple req/s; a 429 means back off for
-                # the advertised reset (or a growing default) and retry the same page.
+            if _is_throttle(resp):
+                # Their docs promise headroom at a couple req/s. Two signals mean the same
+                # thing here and BOTH must be handled: a plain 429, and a 422 whose body
+                # reads "Timeout. Maybe slow down a bit" - the archive answers a sweep it
+                # considers too fast with 422, not 429, so treating only 429 as throttling
+                # made the 422 fall through to the generic raise below and kill the run.
+                # An advertised reset wins; otherwise the limiter's escalating cooldown.
                 try:
                     wait = max(1.0, float(resp.headers.get("X-RateLimit-Reset") or 0))
                 except ValueError:
                     wait = 0.0
-                time.sleep(wait or (2.0 * (attempt + 1)))
-                continue
+                if wait:
+                    time.sleep(wait)
+                    self.limiter.hits += 1
+                    self.limiter.multiplier = min(
+                        self.limiter.multiplier * self.limiter.backoff,
+                        self.limiter.max_multiplier,
+                    )
+                    continue
+                if self.limiter.hit(attempt):
+                    continue
+                raise ArcticShiftError(
+                    f"arctic shift kept throttling (HTTP {resp.status_code}) after "
+                    f"{attempt + 1} attempts: {resp.text[:120]}"
+                )
             if resp.status_code != 200:
                 raise ArcticShiftError(f"arctic shift HTTP {resp.status_code}: {resp.text[:200]}")
+            # Only a clean page decays the multiplier back toward the base pause.
+            self.limiter.success()
             j = resp.json()
             data = j.get("data") if isinstance(j, dict) else j
             return data if isinstance(data, list) else []
-        raise ArcticShiftError("arctic shift kept returning 429 after 4 attempts")
+        raise ArcticShiftError("arctic shift kept throttling after 5 attempts")
 
     def _sweep_api(self, kind: str, sub: str, cap: int) -> Iterator[dict]:
         """Ascending created_utc cursor sweep. `after` is inclusive-boundary-fuzzy, so the
@@ -196,7 +248,9 @@ class ArcticShiftCollector(Collector):
                 next_after = max(after, last_ts) + 1  # force progress
             after = next_after
             self._beat(f"{kind}-sweep", count=yielded)
-            time.sleep(self.pause)
+            # Adaptive, not a fixed self.pause: after a throttle the multiplier is up,
+            # so the sweep paces itself back down instead of charging the same wall again.
+            self.limiter.sleep()
 
     # ---- file mode ----
     def _dump_files(self, sub: str) -> dict:

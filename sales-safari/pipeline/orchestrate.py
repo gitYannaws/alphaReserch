@@ -207,13 +207,21 @@ def pick_collector(seed: str, cfg: dict, known_thread_urls=None, corpus_mode: st
     def xenforo():
         pw = coll.get("playwright", {})
         rl = coll.get("rate_limit", {})
+        # Same cap logic as the render path: a corpus run is bounded by
+        # corpus_max_threads, and max_threads would silently re-cap it at the
+        # bounded-run default and strand most of the board.
+        thread_cap = (coll.get("corpus_max_threads", 10000) if corpus_mode
+                      else coll.get("max_threads", 25))
+        skip = known_thread_urls if corpus_mode in {"backfill", "historical"} else None
         return XenforoCollector(
             thread_patterns=coll.get("thread_url_patterns") or ["/threads/"],
             same_domain_only=coll.get("same_domain_only", True),
-            max_threads=coll.get("max_threads", 25),
+            max_threads=thread_cap,
             min_delay_seconds=pw.get("min_delay_seconds", 1.2),
             max_delay_seconds=pw.get("max_delay_seconds", 2.6),
             max_thread_pages=coll.get("max_thread_pages", 10),
+            max_listing_pages=coll.get("max_listing_pages", 1),
+            skip_thread_urls=skip,
             rl_backoff=rl.get("backoff", 1.6),
             rl_max_mult=rl.get("max_multiplier", 8.0),
             rl_recover=rl.get("recover", 0.9),

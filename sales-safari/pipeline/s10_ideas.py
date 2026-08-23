@@ -289,7 +289,7 @@ def ideas_run(store, run_id: str, top_n: int = 5, extract_cfg: dict = None,
 
     # Primary path: one LLM call synthesises all candidate themes. Falls back to the keyword
     # template per-theme if the call fails or a theme is missing from the response.
-    llm_ideas = {}
+    llm_ideas, llm_error = {}, ""
     if clusters:
         payload = [_theme_payload(store, run_id, c) for c in clusters]
         cfg = _ideas_extract_cfg(extract_cfg, model)
@@ -297,8 +297,15 @@ def ideas_run(store, run_id: str, top_n: int = 5, extract_cfg: dict = None,
             raw, _provider = _call_extractor(IDEA_PROMPT + json.dumps(payload, ensure_ascii=False), cfg)
             for it in _parse_json_array(raw):
                 llm_ideas[str(it.get("id"))] = it
+            if not llm_ideas:
+                llm_error = f"model returned no usable ideas (raw: {raw[:120]!r})"
         except Exception as e:
-            print(f"  ideas: LLM synthesis failed, using template fallback: {str(e)[:120]}")
+            llm_error = str(e)[:200]
+        # A print() here is lost: the detached resume runner captures only its own logger,
+        # so run pbfamily0001 shipped 25 keyword-template "ideas" with no trace of why. The
+        # reason travels in the RESULT instead, which resume.py logs and warns on.
+        if llm_error:
+            print(f"  ideas: LLM synthesis failed, using template fallback: {llm_error}")
 
     made, from_llm, skipped = 0, 0, 0
     llm_answered = bool(llm_ideas)
@@ -326,4 +333,4 @@ def ideas_run(store, run_id: str, top_n: int = 5, extract_cfg: dict = None,
             progress(made, want)
     store.set_stage(run_id, 10, "ideas_generated")
     return {"ideas": made, "from_llm": from_llm, "from_template": made - from_llm,
-            "skipped": skipped}
+            "skipped": skipped, "llm_error": llm_error}

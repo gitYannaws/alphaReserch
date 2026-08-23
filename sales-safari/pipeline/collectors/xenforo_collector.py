@@ -35,10 +35,37 @@ _DIV_TAG = re.compile(r"</?div\b", re.I)
 _TITLE = re.compile(r"<title>(.*?)</title>", re.S)
 _TIME = re.compile(r'<time[^>]*datetime="([^"]+)"')
 _XF_MARKERS = ('data-xf-init', 'xf-init', 'id="xf"', 'xenforo')
+# XenForo emits <link rel="next" href="/forums/x/page-2"> in <head> for a paginated
+# listing. Matching the head link (not the pageNav buttons) keeps this off the thread
+# links, which carry their own /page-N aliases.
+_NEXT = re.compile(r'<link[^>]+rel="next"[^>]+href="([^"]+)"', re.I)
+# One row of the forum's own thread list (as opposed to a sidebar widget).
+_STRUCT_ITEM_TITLE = re.compile(r'class="structItem-title"[^>]*>(.*?)</div>', re.S)
+_HREF = re.compile(r'href="([^"]+)"')
 
 
 class XenforoCollectorError(RuntimeError):
     pass
+
+
+# A guest-gated or removed page, as opposed to a throttle. Both arrive as 403, but this
+# one never clears by waiting. Length gate first, same reasoning as the renderer's
+# is_blocked_text: a wall replaces the content, so it is short - a real thread that
+# happens to discuss "not available" is not a wall.
+_PERMANENT_BLOCK_MARKERS = (
+    "content not available or blocked",
+    "you must be logged in",
+    "members only",
+    "no permission to view",
+    "do not have permission",
+)
+
+
+def is_permanent_block(html: str) -> bool:
+    if not html or len(html) > 20000:
+        return False
+    low = re.sub(r"<[^>]+>", " ", html[:20000]).lower()
+    return any(m in low for m in _PERMANENT_BLOCK_MARKERS)
 
 
 def _host(url: str) -> str:
@@ -146,13 +173,22 @@ class XenforoCollector(Collector):
     def __init__(self, thread_patterns=None, same_domain_only: bool = True,
                  max_threads: int = 25, min_delay_seconds: float = 1.2,
                  max_delay_seconds: float = 2.6, timeout: int = 25,
-                 max_thread_pages: int = 10, rl_backoff: float = 1.6,
+                 max_thread_pages: int = 10, max_listing_pages: int = 1,
+                 skip_thread_urls=None, rl_backoff: float = 1.6,
                  rl_max_mult: float = 8.0, rl_recover: float = 0.9,
                  rl_retries: int = 2, rl_cooldown_seconds: float = 5.0):
         self.thread_patterns = thread_patterns or ["/threads/"]
         self.same_domain_only = same_domain_only
         self.max_threads = max_threads
         self.max_thread_pages = max_thread_pages
+        # Listing pages of THREAD LINKS to walk. 1 = seed page only, which was the
+        # historical behaviour and strands a board: glp1forum.com/forums/public lists
+        # ~78 threads per page of 2.5K, i.e. 3% of that one forum.
+        self.max_listing_pages = max_listing_pages
+        # Thread roots already held for this corpus, so a backfill that dies partway
+        # resumes instead of re-walking what it collected (see the resumability rule).
+        self.skip_thread_urls = {base_thread_url(u.split("#", 1)[0].rstrip("/"))
+                                 for u in (skip_thread_urls or ())}
         self.min_delay = min_delay_seconds
         self.max_delay = max_delay_seconds
         self.timeout = timeout
@@ -182,6 +218,15 @@ class XenforoCollector(Collector):
         for attempt in range(self.limiter.retries + 1):
             r = self.sess.get(url, timeout=self.timeout)
             if r.status_code in (403, 429):
+                # A board can 403 one THREAD while serving its listings fine: glp1forum
+                # gates some stickies behind login and returns its own short "Content Not
+                # Available or Blocked" page. That is permanent for a guest, so retrying
+                # it costs minutes and -- worse -- each retry bumps the adaptive
+                # multiplier, slowing every later request on a board that is not actually
+                # throttling us. Skip it now and leave the limiter alone.
+                if is_permanent_block(r.text):
+                    raise XenforoCollectorError(
+                        f"HTTP {r.status_code} for {url}: members-only or blocked page; skipping")
                 if self.limiter.hit(attempt):
                     continue
                 raise XenforoCollectorError(
@@ -201,7 +246,15 @@ class XenforoCollector(Collector):
     def _thread_links(self, html: str, seed_url: str) -> List[str]:
         seed_host = _host(seed_url)
         out, seen = [], set()
-        for href in re.findall(r'href="([^"]+)"', html):
+        # A XenForo listing carries far more thread links than the board it shows: the
+        # "latest posts" sidebar links threads from every other forum on the site. The
+        # 1-thread /forums/dg/ board yielded 27 roots and 650 posts that belong to other
+        # corpora. Each thread ROW is a .structItem-title, so read the rows when the page
+        # has them and fall back to the whole page for themes that don't.
+        rows = _STRUCT_ITEM_TITLE.findall(html)
+        hrefs = ([m.group(1) for m in (_HREF.search(r) for r in rows) if m] if rows
+                 else re.findall(r'href="([^"]+)"', html))
+        for href in hrefs:
             url = urljoin(seed_url, href).split("#", 1)[0].rstrip("/")
             if not url.startswith(("http://", "https://")):
                 continue
@@ -237,19 +290,56 @@ class XenforoCollector(Collector):
             page += 1
             self._sleep()
 
+    def _iter_listing_threads(self, seed_url: str, max_threads: int) -> Iterator[str]:
+        """Thread roots from the listing, following rel="next" across listing pages.
+
+        Deliberately LAZY, one listing page at a time: walking every listing up front
+        means no document is stored until discovery finishes, and a runner that dies
+        partway throws the whole walk away.
+        """
+        seen, skipped, yielded = set(), 0, 0
+        listing = seed_url
+        for page_no in range(1, max(1, self.max_listing_pages) + 1):
+            html = self._get(listing)
+            roots = []
+            for url in self._thread_links(html, listing):
+                if url in seen:
+                    continue
+                seen.add(url)
+                if url in self.skip_thread_urls:
+                    skipped += 1
+                    continue
+                roots.append(url)
+            if page_no == 1 and not roots and not skipped:
+                raise XenforoCollectorError(
+                    f"no thread links matching {self.thread_patterns} on {listing}"
+                )
+            for root in roots:
+                yield root
+                yielded += 1
+                if yielded >= max_threads:
+                    return
+            if skipped:
+                print(f"  listing page {page_no}: skipped {skipped} threads already collected")
+            nxt = _NEXT.search(html)
+            nxt = urljoin(listing, unescape(nxt.group(1))).split("#", 1)[0].rstrip("/") if nxt else ""
+            if self.same_domain_only and nxt and _host(nxt) != _host(seed_url):
+                nxt = ""
+            if not nxt or nxt == listing:
+                return
+            listing = nxt
+            self._sleep()
+
     def collect(self, seed_url: str, limit: int) -> Iterator[Document]:
         seed = seed_url.split("#", 1)[0].rstrip("/")
-        if self._is_thread(seed):
-            threads = [seed]
-        else:
-            threads = self._thread_links(self._get(seed), seed)[: self.max_threads]
-            if not threads:
-                raise XenforoCollectorError(
-                    f"no thread links matching {self.thread_patterns} on {seed}"
-                )
         # `limit` = number of THREADS (matches other collectors + the "Max threads" UI).
         # Every post within a collected thread is yielded.
-        for turl in threads[:limit]:
+        cap = min(limit, self.max_threads)
+        if self._is_thread(seed):
+            threads = iter([seed])
+        else:
+            threads = self._iter_listing_threads(seed, cap)
+        for turl in threads:
             self._sleep()
             try:
                 for doc in self._thread_posts(turl):

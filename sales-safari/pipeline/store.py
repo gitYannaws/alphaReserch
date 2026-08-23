@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS run_documents(
 CREATE INDEX IF NOT EXISTS idx_run_documents_run ON run_documents(run_id);
 CREATE INDEX IF NOT EXISTS idx_run_documents_doc ON run_documents(document_id);
 
+-- Stage 3a checkpoint. extract_run() reads every document of a run on each pass, so a
+-- crash used to cost the whole extraction: a 186k-document corpus is ~70 hours, and an
+-- interruption at hour 60 restarted at document 1. A row lands here only when a whole
+-- batch has been extracted successfully, so a failed batch is retried on the next pass.
+CREATE TABLE IF NOT EXISTS extract_seen(
+  run_id TEXT,
+  document_id TEXT,
+  seen_at TEXT,
+  PRIMARY KEY(run_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS idx_extract_seen_run ON extract_seen(run_id);
+
 CREATE TABLE IF NOT EXISTS corpora(
   corpus_key TEXT PRIMARY KEY,
   seed_url TEXT,
@@ -108,6 +120,26 @@ CREATE TABLE IF NOT EXISTS run_corpora(
   PRIMARY KEY(run_id, corpus_key)
 );
 CREATE INDEX IF NOT EXISTS idx_run_corpora_key ON run_corpora(corpus_key);
+
+-- Cached per-corpus aggregates for the Sources page. The live query joined
+-- sources x corpus_documents x documents and did COUNT(DISTINCT author_hash) plus
+-- SUM(LENGTH(raw_markdown)) across all 584k documents on EVERY page load: 2.9s warm
+-- and 11s cold on a 1GB database, for 40 rows of output. The numbers only change when
+-- a corpus gains documents, so they are computed once and reused. `computed_doc_count`
+-- is the staleness check -- a corpus is recomputed only when its live document count
+-- has moved, which makes a normal page load a 40-row lookup.
+CREATE TABLE IF NOT EXISTS corpus_stats(
+  corpus_key TEXT PRIMARY KEY,
+  doc_count INTEGER,
+  thread_count INTEGER,
+  author_count INTEGER,
+  total_bytes INTEGER,
+  earliest_post_at TEXT,
+  latest_post_at TEXT,
+  last_fetched_at TEXT,
+  computed_doc_count INTEGER,
+  computed_at TEXT
+);
 
 CREATE TABLE IF NOT EXISTS pains(
   id TEXT PRIMARY KEY,
@@ -150,6 +182,12 @@ CREATE TABLE IF NOT EXISTS cluster_members(
   pain_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_clusters_run ON clusters(run_id);
+-- cluster_members had NO index, so /api/run/{id}/pains planned as "SCAN cm LEFT-JOIN":
+-- every pain full-scanned the whole table. On run 329746779047 that is 14,945 pains x
+-- 9,166 members, and the endpoint took 3.5s. With this index it is 0.4s. Index both
+-- columns: pain_id drives the pains join, cluster_id drives cluster-details.
+CREATE INDEX IF NOT EXISTS idx_cluster_members_pain ON cluster_members(pain_id);
+CREATE INDEX IF NOT EXISTS idx_cluster_members_cluster ON cluster_members(cluster_id);
 
 CREATE TABLE IF NOT EXISTS demand_scores(
   cluster_id TEXT PRIMARY KEY,
@@ -184,6 +222,17 @@ CREATE TABLE IF NOT EXISTS soft_filters(
   warnings TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_soft_filters_run ON soft_filters(run_id);
+
+-- Stage 7.6. One emotional-stance row per theme. Separate from soft_filters because it is
+-- a backfill you can run, re-run or skip without touching the solvability verdict.
+CREATE TABLE IF NOT EXISTS sentiments(
+  cluster_id TEXT PRIMARY KEY,
+  run_id TEXT,
+  stance TEXT,
+  urgency REAL,
+  reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sentiments_run ON sentiments(run_id);
 
 CREATE TABLE IF NOT EXISTS competitive_intel(
   cluster_id TEXT PRIMARY KEY,
@@ -576,7 +625,18 @@ class Store:
         ).fetchall()
         return [dict(zip(cols, row)) for row in rows]
 
-    def list_runs(self, limit: int = 50, offset: int = 0, q: str = "", status: str = ""):
+    # Whitelist: the sort key arrives from a query string and lands in an ORDER BY.
+    RUN_SORTS = {
+        "job_id": "r.job_id",
+        "seed_url": "r.seed_url",
+        "status": "r.status",
+        "updated_at": "COALESCE(r.updated_at, r.created_at)",
+        "doc_count": "doc_count",
+        "pain_count": "pain_count",
+    }
+
+    def list_runs(self, limit: int = 50, offset: int = 0, q: str = "", status: str = "",
+                  sort: str = "", direction: str = "desc"):
         where, params = [], []
         if q:
             where.append("(r.seed_url LIKE ? OR r.job_id LIKE ?)")
@@ -585,6 +645,8 @@ class Store:
             where.append("r.status = ?")
             params.append(status)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
+        col = self.RUN_SORTS.get(sort, "COALESCE(r.updated_at, r.created_at)")
+        way = "DESC" if str(direction).lower() == "desc" else "ASC"
         rows = self.conn.execute(
             "SELECT r.job_id, r.seed_url, r.stage, r.status, r.error, r.note, r.created_at, r.updated_at, "
             "r.extractor, r.extract_provider, r.extract_model, r.prompt_version, "
@@ -595,7 +657,8 @@ class Store:
             "(SELECT COUNT(*) FROM ideas i WHERE i.run_id=r.job_id) AS idea_count, "
             "(SELECT path FROM reports rep WHERE rep.run_id=r.job_id) AS report_path "
             f"FROM runs r {clause} "
-            "ORDER BY COALESCE(r.updated_at, r.created_at) DESC "
+            # r.job_id breaks ties, so a row cannot slip between two pages.
+            f"ORDER BY {col} {way}, r.job_id "
             "LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
@@ -925,31 +988,83 @@ class Store:
             (datetime.now(timezone.utc).isoformat(), source_id))
         self.conn.commit()
 
+    _STAT_COLS = ("doc_count", "thread_count", "author_count", "total_bytes",
+                  "earliest_post_at", "latest_post_at", "last_fetched_at")
+
+    def _refresh_corpus_stats(self, keys: list[str]) -> int:
+        """Recompute cached aggregates for any corpus whose document count has moved.
+
+        One grouped pass over corpus_documents x documents per stale corpus. Costs the
+        same as the old inline query did, but only for corpora that actually changed --
+        so it is paid after a collection run, not on every page load.
+        """
+        keys = [k for k in dict.fromkeys(keys) if k]
+        if not keys:
+            return 0
+        marks = ",".join("?" * len(keys))
+        live = dict(self.conn.execute(
+            f"SELECT corpus_key, COUNT(*) FROM corpus_documents "
+            f"WHERE corpus_key IN ({marks}) GROUP BY corpus_key", keys).fetchall())
+        cached = dict(self.conn.execute(
+            f"SELECT corpus_key, computed_doc_count FROM corpus_stats "
+            f"WHERE corpus_key IN ({marks})", keys).fetchall())
+        stale = [k for k in keys if cached.get(k) != live.get(k, 0)]
+        if not stale:
+            return 0
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        for key in stale:
+            row = self.conn.execute(
+                "SELECT COUNT(cd.document_id),"
+                " COUNT(DISTINCT COALESCE(NULLIF(d.thread_url,''), NULLIF(d.title,''), d.id)),"
+                " COUNT(DISTINCT d.author_hash),"
+                " COALESCE(SUM("
+                "  LENGTH(CAST(COALESCE(d.raw_markdown,'') AS BLOB)) +"
+                "  LENGTH(CAST(COALESCE(d.title,'') AS BLOB)) +"
+                "  LENGTH(CAST(COALESCE(d.source_url,'') AS BLOB)) +"
+                "  LENGTH(CAST(COALESCE(d.permalink,'') AS BLOB))), 0),"
+                " MIN(d.created_at), MAX(d.created_at), MAX(d.fetched_at) "
+                "FROM corpus_documents cd "
+                "LEFT JOIN documents d ON d.id=cd.document_id "
+                "WHERE cd.corpus_key=?", (key,)).fetchone()
+            self.conn.execute(
+                "INSERT INTO corpus_stats(corpus_key,doc_count,thread_count,author_count,"
+                "total_bytes,earliest_post_at,latest_post_at,last_fetched_at,"
+                "computed_doc_count,computed_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(corpus_key) DO UPDATE SET "
+                "doc_count=excluded.doc_count, thread_count=excluded.thread_count,"
+                "author_count=excluded.author_count, total_bytes=excluded.total_bytes,"
+                "earliest_post_at=excluded.earliest_post_at,"
+                "latest_post_at=excluded.latest_post_at,"
+                "last_fetched_at=excluded.last_fetched_at,"
+                "computed_doc_count=excluded.computed_doc_count,"
+                "computed_at=excluded.computed_at",
+                (key, *row, live.get(key, 0), now))
+        self.conn.commit()
+        return len(stale)
+
     def list_sources(self) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT s.id,s.url,s.label,s.corpus_key,s.added_at,s.last_queued_at,"
-            "COUNT(cd.document_id) AS doc_count,"
-            "COUNT(DISTINCT COALESCE(NULLIF(d.thread_url,''), NULLIF(d.title,''), d.id)) AS thread_count,"
-            "COUNT(DISTINCT d.author_hash) AS author_count,"
-            "COALESCE(SUM("
-            "LENGTH(CAST(COALESCE(d.raw_markdown,'') AS BLOB)) + "
-            "LENGTH(CAST(COALESCE(d.title,'') AS BLOB)) + "
-            "LENGTH(CAST(COALESCE(d.source_url,'') AS BLOB)) + "
-            "LENGTH(CAST(COALESCE(d.permalink,'') AS BLOB))"
-            "), 0) AS total_bytes,"
-            "MIN(d.created_at) AS earliest_post_at,"
-            "MAX(d.created_at) AS latest_post_at,"
-            "MAX(d.fetched_at) AS last_fetched_at "
-            "FROM sources s "
-            "LEFT JOIN corpus_documents cd ON cd.corpus_key=s.corpus_key "
-            "LEFT JOIN documents d ON d.id=cd.document_id "
-            "GROUP BY s.id,s.url,s.label,s.corpus_key,s.added_at,s.last_queued_at "
-            "ORDER BY s.added_at DESC"
-        ).fetchall()
-        cols = ["id", "url", "label", "corpus_key", "added_at", "last_queued_at",
-                "doc_count", "thread_count", "author_count", "total_bytes",
-                "earliest_post_at", "latest_post_at", "last_fetched_at"]
+            "SELECT id,url,label,corpus_key,added_at,last_queued_at "
+            "FROM sources ORDER BY added_at DESC").fetchall()
+        cols = ["id", "url", "label", "corpus_key", "added_at", "last_queued_at"]
         out = [dict(zip(cols, row)) for row in rows]
+
+        # Aggregates come from the cache, recomputed only for corpora that grew.
+        self._refresh_corpus_stats([s["corpus_key"] for s in out])
+        stats = {
+            key: dict(zip(self._STAT_COLS, rest))
+            for key, *rest in self.conn.execute(
+                "SELECT corpus_key," + ",".join(self._STAT_COLS) + " FROM corpus_stats")
+        }
+        empty = dict.fromkeys(self._STAT_COLS)
+        for src in out:
+            src.update(empty)
+            src["doc_count"] = 0
+            src["thread_count"] = 0
+            src["author_count"] = 0
+            src["total_bytes"] = 0
+            src.update(stats.get(src["corpus_key"]) or {})
         # Freshness for every source in two set-based queries, not one pair per source: the
         # per-source call used to walk run_documents and cost ~570ms each.
         latest = self._latest_run_per_corpus([s["corpus_key"] for s in out])
@@ -1087,6 +1202,29 @@ class Store:
             (run_id,)).fetchall()
         return [dict(zip(cols, r)) for r in rows]
 
+    def get_extracted_doc_ids(self, run_id: str) -> set:
+        """Documents already extracted for this run, so a resumed pass skips them.
+        A document that yielded no pain still lands here -- `pains` alone cannot tell
+        "processed, found nothing" from "never processed"."""
+        return {r[0] for r in self.conn.execute(
+            "SELECT document_id FROM extract_seen WHERE run_id=?", (run_id,))}
+
+    def mark_docs_extracted(self, run_id: str, doc_ids) -> None:
+        """Checkpoint a finished batch. Call only after the batch succeeded."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO extract_seen(run_id,document_id,seen_at) VALUES(?,?,?)",
+            [(run_id, d, now) for d in doc_ids])
+        self.conn.commit()
+
+    def clear_extracted_marks(self, run_id: str) -> int:
+        """Forget the checkpoint so the next pass re-extracts everything (e.g. after a
+        prompt or model change, where old results are no longer comparable)."""
+        cur = self.conn.execute("DELETE FROM extract_seen WHERE run_id=?", (run_id,))
+        self.conn.commit()
+        return cur.rowcount
+
     def insert_pain(self, run_id: str, p: dict) -> bool:
         pid = hashlib.sha1(
             f"{run_id}::{p['document_id']}::{p['verbatim_span']}".encode("utf-8")).hexdigest()[:16]
@@ -1111,6 +1249,7 @@ class Store:
     def distinct_personas(self, run_id: str):
         return [r[0] for r in self.conn.execute(
             "SELECT DISTINCT persona FROM pains WHERE run_id=? "
+            "AND COALESCE(verified,1)!=0 "
             "AND persona IS NOT NULL AND TRIM(persona)<>''", (run_id,)).fetchall()]
 
     def update_persona_canonical(self, run_id: str, mapping: dict):
@@ -1196,7 +1335,8 @@ class Store:
     def get_embeddings(self, run_id: str):
         rows = self.conn.execute(
             "SELECT e.pain_id, e.vec, p.author_hash FROM embeddings e "
-            "JOIN pains p ON p.id=e.pain_id WHERE e.run_id=?", (run_id,)).fetchall()
+            "JOIN pains p ON p.id=e.pain_id "
+            "WHERE e.run_id=? AND COALESCE(p.verified,1)!=0", (run_id,)).fetchall()
         return rows  # [(pain_id, vec_bytes, author_hash)]
 
     # ---- stage 5: clusters ----
@@ -1234,18 +1374,30 @@ class Store:
             "ORDER BY distinct_authors DESC, size DESC", (run_id,)).fetchall()
         return [{"label": r[0], "size": r[1], "distinct_authors": r[2]} for r in rows]
 
-    def get_cluster_details(self, run_id: str):
-        rows = self.conn.execute(
-            "SELECT c.id,c.label,c.size,c.distinct_authors,p.id,p.complaint,"
-            "p.workflow_pain,p.workaround,p.wish,p.persona,p.verbatim_span,"
-            "p.source_permalink,p.author_hash,d.source_granularity,d.score,d.thread_url,d.title "
-            "FROM clusters c "
-            "JOIN cluster_members cm ON cm.cluster_id=c.id "
-            "JOIN pains p ON p.id=cm.pain_id "
-            "LEFT JOIN documents d ON d.id=p.document_id "
-            "WHERE c.run_id=? "
-            "ORDER BY c.distinct_authors DESC,c.size DESC,c.id",
-            (run_id,)).fetchall()
+    def get_cluster_details(self, run_id: str, cluster_ids=None):
+        """Every theme with its member pains, or only `cluster_ids` when given.
+
+        The whole-run form is what the pipeline stages want. The web app must not use it:
+        run pbfamily0001 has 8,925 themes and serialises to 22.8 MB, which froze the tab on
+        open. The UI asks for the ids it is about to draw instead.
+        """
+        sql = ("SELECT c.id,c.label,c.size,c.distinct_authors,p.id,p.complaint,"
+               "p.workflow_pain,p.workaround,p.wish,p.persona,p.verbatim_span,"
+               "p.source_permalink,p.author_hash,d.source_granularity,d.score,d.thread_url,d.title "
+               "FROM clusters c "
+               "JOIN cluster_members cm ON cm.cluster_id=c.id "
+               "JOIN pains p ON p.id=cm.pain_id "
+               "LEFT JOIN documents d ON d.id=p.document_id "
+               "WHERE c.run_id=?")
+        params = [run_id]
+        if cluster_ids is not None:
+            ids = list(cluster_ids)
+            if not ids:
+                return []
+            sql += " AND c.id IN (%s)" % ",".join("?" * len(ids))
+            params.extend(ids)
+        sql += " ORDER BY c.distinct_authors DESC,c.size DESC,c.id"
+        rows = self.conn.execute(sql, params).fetchall()
         clusters = {}
         for r in rows:
             cid = r[0]
@@ -1276,6 +1428,201 @@ class Store:
 
     def count_clusters(self, run_id: str) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM clusters WHERE run_id=?", (run_id,)).fetchone()[0]
+
+    # ---- pain browsing (web app) ----
+    # Whitelist, not free text: these names are pasted into SQL to test "this field is
+    # non-empty", so an unchecked value from the query string would be an injection.
+    PAIN_TEXT_FIELDS = ("complaint", "wish", "workflow_pain", "workaround")
+
+    _PAIN_FROM = (
+        " FROM pains p "
+        "LEFT JOIN cluster_members cm ON cm.pain_id=p.id "
+        "LEFT JOIN clusters c ON c.id=cm.cluster_id AND c.run_id=p.run_id "
+        "LEFT JOIN soft_filters sf ON sf.cluster_id=c.id AND sf.run_id=p.run_id ")
+
+    @staticmethod
+    def _like(term: str) -> str:
+        """% and _ are wildcards; a user searching for "100%" must not match everything."""
+        esc = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return "%" + esc + "%"
+
+    def _pain_where(self, run_id: str, q=None, persona=None, theme=None,
+                    solvable=None, types=None, clustered=None):
+        where = ["p.run_id=?", "COALESCE(p.verified,1)!=0"]
+        params = [run_id]
+        if persona:
+            where.append("COALESCE(NULLIF(p.persona_canonical,''),p.persona)=?")
+            params.append(persona)
+        if theme:
+            where.append("c.label=?")
+            params.append(theme)
+        if solvable:
+            vals = [v for v in solvable if v]
+            if vals:
+                parts = []
+                if "_none" in vals:
+                    parts.append("sf.solvable IS NULL")
+                named = [v for v in vals if v != "_none"]
+                if named:
+                    parts.append("sf.solvable IN (%s)" % ",".join("?" * len(named)))
+                    params.extend(named)
+                where.append("(%s)" % " OR ".join(parts))
+        if types:
+            good = [t for t in types if t in self.PAIN_TEXT_FIELDS]
+            if good:
+                where.append("(%s)" % " OR ".join(
+                    "TRIM(COALESCE(p.%s,''))!=''" % t for t in good))
+        if clustered == "themed":
+            where.append("c.id IS NOT NULL")
+        elif clustered == "unclustered":
+            where.append("c.id IS NULL")
+        if q:
+            cols = ["p.complaint", "p.wish", "p.workflow_pain", "p.workaround",
+                    "p.verbatim_span", "p.persona", "p.persona_canonical", "c.label"]
+            where.append("(%s)" % " OR ".join(
+                "COALESCE(%s,'') LIKE ? ESCAPE '\\'" % col for col in cols))
+            params.extend([self._like(q)] * len(cols))
+        return " AND ".join(where), params
+
+    def count_pains_filtered(self, run_id: str, **filters) -> int:
+        where, params = self._pain_where(run_id, **filters)
+        sql = "SELECT COUNT(*)" + self._PAIN_FROM + "WHERE " + where
+        return self.conn.execute(sql, params).fetchone()[0]
+
+    # Column name -> SQL expression. A whitelist, because the value comes from a query
+    # string and is pasted into an ORDER BY.
+    PAIN_SORTS = {
+        "persona": "COALESCE(NULLIF(p.persona_canonical,''),p.persona)",
+        "theme": "c.label",
+        "complaint": "COALESCE(NULLIF(p.complaint,''),NULLIF(p.wish,''),"
+                     "NULLIF(p.workflow_pain,''),p.workaround)",
+        "span": "p.verbatim_span",
+        "source": "COALESCE(p.source_permalink,p.source_id)",
+        "solvable": "sf.solvable",
+    }
+
+    def get_pain_page(self, run_id: str, limit: int = 300, offset: int = 0,
+                      sort: str = "", direction: str = "asc", **filters):
+        """One screen of pains. The old endpoint returned all 74,849 rows (41 MB of JSON)."""
+        where, params = self._pain_where(run_id, **filters)
+        col = self.PAIN_SORTS.get(sort)
+        way = "DESC" if str(direction).lower() == "desc" else "ASC"
+        # Two rules beyond the column itself:
+        #  - blanks sink in BOTH directions; SQLite would otherwise float every NULL to the
+        #    top of an ascending sort and fill page 1 with empty cells.
+        #  - p.id breaks ties. Without it the order of equal rows is undefined, so a row
+        #    could show on two pages, or on none, as the reader steps through.
+        order = ("(%s IS NULL OR %s='') ASC, %s %s, p.id" % (col, col, col, way)) \
+            if col else ("p.id %s" % way)
+        sql = ("SELECT p.persona,p.complaint,p.workflow_pain,p.wish,p.verbatim_span,"
+               "COALESCE(p.source_permalink,p.source_id),p.span_start,p.span_end,"
+               "c.label,c.id,p.workaround,sf.solvable,p.persona_canonical"
+               + self._PAIN_FROM + "WHERE " + where
+               + " ORDER BY " + order + " LIMIT ? OFFSET ?")
+        rows = self.conn.execute(sql, params + [max(1, limit), max(0, offset)]).fetchall()
+        return [{"persona": r[0], "complaint": r[1], "workflow_pain": r[2],
+                 "wish": r[3], "span": r[4], "source": r[5],
+                 "span_start": r[6], "span_end": r[7],
+                 "theme": r[8], "cluster_id": r[9],
+                 "workaround": r[10], "solvable": r[11],
+                 "persona_canonical": r[12] or r[0]} for r in rows]
+
+    def get_pain_facets(self, run_id: str, limit: int = 300):
+        """Dropdown contents: the `limit` commonest of each, biggest first.
+
+        Not the full lists. pbfamily0001 has 9,631 personas and 8,925 themes, so "every
+        distinct value" is 759 KB and 18,556 <option> elements that no one can scroll. The
+        long tail is reachable through the search box, which is SQL over every row.
+        """
+        cap = max(1, limit)
+        personas = [r[0] for r in self.conn.execute(
+            "SELECT COALESCE(NULLIF(persona_canonical,''),persona) AS seg,COUNT(*) AS n "
+            "FROM pains WHERE run_id=? AND COALESCE(verified,1)!=0 AND seg IS NOT NULL "
+            "AND seg!='' GROUP BY seg ORDER BY n DESC,seg LIMIT ?", (run_id, cap)) if r[0]]
+        themes = [r[0] for r in self.conn.execute(
+            "SELECT label FROM clusters WHERE run_id=? AND label IS NOT NULL AND label!='' "
+            "ORDER BY distinct_authors DESC,size DESC LIMIT ?", (run_id, cap)) if r[0]]
+        counts = self.conn.execute(
+            "SELECT (SELECT COUNT(DISTINCT COALESCE(NULLIF(persona_canonical,''),persona)) "
+            "FROM pains WHERE run_id=? AND COALESCE(verified,1)!=0),"
+            "(SELECT COUNT(*) FROM clusters WHERE run_id=?)", (run_id, run_id)).fetchone()
+        return {"personas": personas, "themes": themes,
+                "persona_total": counts[0], "theme_total": counts[1]}
+
+    def get_viz_themes(self, run_id: str, limit: int = 400):
+        """The `limit` most-supported themes, with the numbers the theme map plots.
+
+        Capped because the map is a scatter: 8,925 dots is a smear, not a chart, and the
+        tail is themes one or two authors mentioned. The count of what was left out is
+        returned so the chart can say so.
+        """
+        rows = self.conn.execute(
+            "SELECT c.id,c.label,d.distinct_authors,d.demand_score,d.pain_intensity,"
+            "d.evidence_count,sf.solvable "
+            "FROM clusters c JOIN demand_scores d ON d.cluster_id=c.id AND d.run_id=c.run_id "
+            "LEFT JOIN soft_filters sf ON sf.cluster_id=c.id AND sf.run_id=c.run_id "
+            "WHERE c.run_id=? ORDER BY d.distinct_authors DESC,d.demand_score DESC "
+            "LIMIT ?", (run_id, max(1, limit))).fetchall()
+        total = self.conn.execute(
+            "SELECT COUNT(*) FROM demand_scores WHERE run_id=?", (run_id,)).fetchone()[0]
+        return {"total": total, "themes": [
+            {"id": r[0], "label": r[1], "authors": r[2] or 0, "demand": r[3] or 0.0,
+             "intensity": r[4] or 0.0, "evidence": r[5] or 0, "solvable": r[6]}
+            for r in rows]}
+
+    def get_pain_timeline(self, run_id: str):
+        """Pains per calendar month, by the date the SOURCE post was written.
+
+        Not the date we collected it: a backfill crawls ten years of forum in one night,
+        so fetched_at would draw a single spike and say nothing about the topic.
+        """
+        rows = self.conn.execute(
+            "SELECT substr(d.created_at,1,7) AS ym,COUNT(*) "
+            "FROM pains p JOIN documents d ON d.id=p.document_id "
+            "WHERE p.run_id=? AND COALESCE(p.verified,1)!=0 "
+            "AND d.created_at IS NOT NULL AND d.created_at!='' "
+            "GROUP BY ym ORDER BY ym", (run_id,)).fetchall()
+        return [{"month": r[0], "pains": r[1]} for r in rows if r[0]]
+
+    def get_top_personas(self, run_id: str, limit: int = 15):
+        rows = self.conn.execute(
+            "SELECT COALESCE(NULLIF(persona_canonical,''),persona) AS seg,COUNT(*) AS n,"
+            "COUNT(DISTINCT author_hash) FROM pains "
+            "WHERE run_id=? AND COALESCE(verified,1)!=0 AND seg IS NOT NULL AND seg!='' "
+            "GROUP BY seg ORDER BY n DESC,seg LIMIT ?", (run_id, max(1, limit))).fetchall()
+        return [{"persona": r[0], "pains": r[1], "authors": r[2]} for r in rows]
+
+    def get_idea_strength(self, run_id: str):
+        """Each idea with the evidence its own theme carries.
+
+        The ideas card lists title and pitch and nothing else, so a one-author throwaway
+        reads exactly like the theme 493 people complained about. This is the join that
+        tells them apart.
+        """
+        rows = self.conn.execute(
+            "SELECT i.id,i.title,i.cluster_id,c.label,COALESCE(c.distinct_authors,0),"
+            "COALESCE(d.demand_score,0),r.rank,r.rank_score,s.stance,s.urgency "
+            "FROM ideas i "
+            "LEFT JOIN clusters c ON c.id=i.cluster_id AND c.run_id=i.run_id "
+            "LEFT JOIN demand_scores d ON d.cluster_id=i.cluster_id AND d.run_id=i.run_id "
+            "LEFT JOIN rankings r ON r.cluster_id=i.cluster_id AND r.run_id=i.run_id "
+            "LEFT JOIN sentiments s ON s.cluster_id=i.cluster_id AND s.run_id=i.run_id "
+            "WHERE i.run_id=? "
+            "ORDER BY COALESCE(r.rank_score, d.demand_score, 0) DESC, i.id", (run_id,)).fetchall()
+        return [{"id": r[0], "title": r[1], "cluster_id": r[2], "theme": r[3],
+                 "authors": r[4], "demand": r[5], "rank": r[6],
+                 "rank_score": r[7], "stance": r[8], "urgency": r[9]} for r in rows]
+
+    def iter_pain_terms_source(self, run_id: str):
+        """(author_hash, text) per verified pain, short fields only.
+
+        verbatim_span is left out on purpose: it is the raw quote, so it is an order of
+        magnitude longer and drags forum boilerplate into the word counts.
+        """
+        sql = ("SELECT author_hash,complaint,wish,workflow_pain,workaround FROM pains "
+               "WHERE run_id=? AND COALESCE(verified,1)!=0")
+        for r in self.conn.execute(sql, (run_id,)):
+            yield r[0], " ".join(x for x in r[1:] if x)
 
     # ---- stage 6: demand ----
     def clear_demand(self, run_id: str):
@@ -1322,6 +1669,47 @@ class Store:
             (cluster_id, run_id, solvable, confidence, reason,
              json.dumps(list(warnings or []))))
         self.conn.commit()
+
+    # ---- stage 7.6: sentiment ----
+    def clear_sentiment(self, run_id: str):
+        self.conn.execute("DELETE FROM sentiments WHERE run_id=?", (run_id,))
+        self.conn.commit()
+
+    def get_sentiment_ids(self, run_id: str) -> set:
+        """Themes already rated. The stage sends only the rest, so a crash two hours in
+        costs the current batch and nothing more."""
+        return {r[0] for r in self.conn.execute(
+            "SELECT cluster_id FROM sentiments WHERE run_id=?", (run_id,))}
+
+    def save_sentiment(self, run_id: str, cluster_id: str, stance: str,
+                       urgency: float, reason: str):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sentiments(cluster_id,run_id,stance,urgency,reason) "
+            "VALUES(?,?,?,?,?)", (cluster_id, run_id, stance, urgency, reason))
+        self.conn.commit()
+
+    def get_sentiment_summary(self, run_id: str):
+        """Counts and weight per stance, for the chart.
+
+        Weighted by distinct_authors as well as by theme count: 400 themes that one person
+        each mentioned should not outvote one theme that 493 people are angry about.
+        """
+        rows = self.conn.execute(
+            "SELECT s.stance,COUNT(*),COALESCE(SUM(c.distinct_authors),0),"
+            "ROUND(AVG(s.urgency),2) "
+            "FROM sentiments s JOIN clusters c ON c.id=s.cluster_id AND c.run_id=s.run_id "
+            "WHERE s.run_id=? GROUP BY s.stance", (run_id,)).fetchall()
+        return [{"stance": r[0], "themes": r[1], "authors": r[2], "urgency": r[3] or 0.0}
+                for r in rows]
+
+    def get_sentiment_examples(self, run_id: str, stance: str, limit: int = 5):
+        rows = self.conn.execute(
+            "SELECT c.label,c.distinct_authors,s.urgency,s.reason "
+            "FROM sentiments s JOIN clusters c ON c.id=s.cluster_id AND c.run_id=s.run_id "
+            "WHERE s.run_id=? AND s.stance=? ORDER BY c.distinct_authors DESC LIMIT ?",
+            (run_id, stance, max(1, limit))).fetchall()
+        return [{"label": r[0], "authors": r[1], "urgency": r[2], "reason": r[3]}
+                for r in rows]
 
     # ---- stage 9.5: competitor discovery ----
     def clear_competitors(self, run_id: str):

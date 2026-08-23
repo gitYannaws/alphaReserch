@@ -35,6 +35,7 @@ def analyze_run(store, run_id: str, cfg: dict, root: Path = Path(".")) -> dict:
             enabled_filters=cfg.get("hard_filters", []))
     stats["rank"] = rank_run(
         store, run_id, solvable_weights=rank_weights,
+        allowed_solvability=rank_cfg.get("allowed_solvability"),
         min_support=rank_cfg.get("min_support"))
     stats["ideas"] = ideas_run(store, run_id, cfg.get("ideas", {}).get("top_n", 5),
                                extract_cfg=cfg.get("extract", {}),

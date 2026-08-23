@@ -93,6 +93,64 @@ class VerifyStageTests(unittest.TestCase):
             self.assertEqual(store.count_unverified_pains(run), 0)
             store.close()
 
+    def test_required_verdict_blocks_unjudged_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "v.sqlite"))
+            run, _ = self._seed(store)
+
+            orig = extract._call_provider
+            extract._call_provider = lambda p, pr, c: "[]"
+            try:
+                with self.assertRaisesRegex(RuntimeError, "requires a verdict"):
+                    extract.verify_run(
+                        store, run,
+                        verify_cfg={"keep_types": ["product_friction"],
+                                    "require_verdict": True},
+                    )
+            finally:
+                extract._call_provider = orig
+
+            # Keeping these rows NULL makes the failed verification stage resumable and
+            # prevents a caller configured for precision from treating them as approved.
+            self.assertEqual(store.count_unverified_pains(run), 4)
+            store.close()
+
+    def test_verifier_uses_configured_provider_fallback_chain(self):
+        calls = []
+
+        def fake_call(prompt, cfg):
+            calls.append(cfg["providers"])
+            return json.dumps([
+                {"id": "p1", "pain_type": "product_friction", "reason": "manual work"}
+            ]), "codex"
+
+        orig = extract._call_extractor
+        extract._call_extractor = fake_call
+        try:
+            verdicts = extract.classify_candidates(
+                [{"id": "p1", "span": "I retype invoices every week.", "context": ""}],
+                verify_cfg={"providers": ["claude", "codex"],
+                            "keep_types": ["product_friction"]},
+            )
+        finally:
+            extract._call_extractor = orig
+
+        self.assertEqual(calls, [["claude", "codex"]])
+        self.assertEqual(verdicts["p1"]["verified"], 1)
+
+    def test_rejected_pain_embeddings_are_not_cluster_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "v.sqlite"))
+            run, _ = self._seed(store)
+            pains = store.get_pains(run)
+            for i, pain in enumerate(pains):
+                store.save_embedding(run, pain["id"], bytes([i]))
+            store.set_pain_verdict(pains[0]["id"], "off_topic", 0, "joke")
+
+            embedded_ids = {row[0] for row in store.get_embeddings(run)}
+            self.assertEqual(embedded_ids, {p["id"] for p in pains[1:]})
+            store.close()
+
     def test_get_pains_keeps_null_verified_for_old_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "v.sqlite"))

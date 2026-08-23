@@ -202,15 +202,20 @@ def brief_run(store, run_id: str, extract_cfg: dict = None, model: str = DEFAULT
         payloads.append(payload)
         supplied_by_idea[idea["cluster_id"]] = supplied
 
-    by_idea = {}
+    by_idea, llm_error = {}, ""
     cfg = research_cfg(extract_cfg, model, SYSTEM_PROMPT)
     try:
         raw, _provider = _call_extractor(
             BRIEF_PROMPT + json.dumps(payloads, ensure_ascii=False), cfg)
         for it in _parse_json_array(raw):
             by_idea[str(it.get("id"))] = it
+        if not by_idea:
+            llm_error = f"model returned no usable briefs (raw: {raw[:120]!r})"
     except Exception as e:
-        print(f"  brief: LLM call failed, using thin fallback: {str(e)[:160]}")
+        llm_error = str(e)[:200]
+    # Carried in the result, not printed: the detached runner does not capture stage stdout.
+    if llm_error:
+        print(f"  brief: LLM call failed, using thin fallback: {llm_error}")
 
     made = with_evidence = from_llm = 0
     for i, idea in enumerate(ideas, start=1):
@@ -245,7 +250,8 @@ def brief_run(store, run_id: str, extract_cfg: dict = None, model: str = DEFAULT
             progress(i, len(ideas))
 
     store.set_stage(run_id, 10, "briefed")
-    return {"briefs": made, "with_review_evidence": with_evidence, "from_llm": from_llm}
+    return {"briefs": made, "with_review_evidence": with_evidence, "from_llm": from_llm,
+            "llm_error": llm_error}
 
 
 if __name__ == "__main__":

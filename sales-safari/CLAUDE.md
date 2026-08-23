@@ -192,6 +192,24 @@ webapp/
   advocacy / nonprofit / blog categories are rejected outright. Run `9af5b27db46e` had stored
   The Atlantic, VICE and Snopes as competitors and then mined 75 App Store reviews of them as
   "incumbent gaps".
+- **A fallback must be LOUD.** Stages 10a/9b/10b each catch their own LLM failure and carry
+  on with a keyword template, which is right — one bad call must not sink a 40-hour run. But
+  they reported it with `print()`, and the detached runner captures only its own logger. Run
+  `pbfamily0001` therefore finished `status=done` with all 25 ideas as templates, 0
+  competitors and 25 unproven briefs; the only clue in the log was `template=25`. Each stage
+  now returns `llm_error` (set on an exception AND on an empty answer), `resume.Runner`
+  logs `WARN ... DEGRADED`, and a run that ends on any fallback path repeats it as
+  `NOTIFY INCOMPLETE`. Never let a stub answer look like work.
+- **The guard's liveness check must not read process command lines over stdout.** PowerShell
+  runs them through the console formatter, which TRUNCATES at the host buffer width (70 cols
+  here) — a ~105-char resume command line arrived as `...\.venv\Scripts\python.exe -`, with
+  `pipeline.resume` and the job id cut off, so `process_alive()` said False for a healthy
+  runner. `scripts/guard_pipeline.py` then restarted `pbfamily0001` every 10 minutes for six
+  hours on 2026-08-21, stacking concurrent runners on one SQLite file: the guard log shows
+  RESTARTED at 09:21/09:41/09:51 while extraction progress climbed 176,425 → 177,760 docs
+  between them. Stage 5 sat at 2/3 for ~3 hours and stage 7 restarted 10 times, each reset
+  zeroing soft-filter progress. Do the matching INSIDE PowerShell and return a COUNT — an
+  integer cannot be truncated. An unreadable process check now means ALIVE, never dead.
 - **An idea is never a refusal.** Stage 10a returns `{"skip":true,"reason"}` for a theme it
   cannot honestly build a product from, and backfills from further down the ranking. Run
   `9af5b27db46e` shipped 3 of 5 ideas titled "Software-adjacent only: not a product-shaped

@@ -184,6 +184,19 @@ class RankFormulaTest(unittest.TestCase):
         self.assertEqual(scores["saturated"], scores["unknown"])
         self.assertEqual(scores["saturated"], 18.0)
 
+    def test_unsolvable_theme_cannot_be_ranked_when_precision_policy_is_enabled(self):
+        store = self._RankStore([
+            ("software", 6.0, 3.0, 0.0, 0, "[]", "yes"),
+            ("physical", 9.0, 3.0, 0.0, 0, "[]", "no"),
+        ])
+        rank_run(store, "run1", allowed_solvability=["yes", "partial"])
+
+        rows = {r["cluster_id"]: r for r in store.saved}
+        self.assertEqual(rows["software"]["rank"], 1)
+        self.assertIsNone(rows["physical"]["rank"])
+        self.assertEqual(rows["physical"]["rank_score"], 0.0)
+        self.assertIn("not_rankable_solvability", rows["physical"]["filter_reasons"])
+
 
 class IdeaDraftTest(unittest.TestCase):
     class _IdeaStore(_ChainStore):

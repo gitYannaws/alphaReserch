@@ -112,11 +112,17 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
         prompt = PROMPT_HEADER + json.dumps(batch, ensure_ascii=False)
         try:
             raw, _provider = _call_extractor(prompt, extract_cfg)
+            parsed = _parse_json_array(raw)
         except Exception as e:
-            # A failed batch must not silently mark 40 themes "unknown" with no trace.
+            # A failed batch must not silently mark 40 themes "unknown" with no trace, and it
+            # must not take the other batches with it. The parse belongs inside this guard:
+            # a local model emitting one malformed array used to raise straight out of the
+            # loop, so a single bad batch left every theme unclassified -- which rank then
+            # read as solvability "unknown" and dropped ALL of them (run 9af5b27db46e:
+            # ranked=0 dropped=619 from one JSONDecodeError).
             print(f"  softfilter batch of {len(batch)} failed: {str(e)[:160]}")
             continue
-        for it in _parse_json_array(raw):
+        for it in parsed:
             items[str(it.get("id"))] = it
 
     counts, classified, flagged = {}, 0, 0
@@ -152,7 +158,14 @@ if __name__ == "__main__":
     cfg = load_config()
     store = Store(cfg.get("db_path", "db/safari.sqlite"))
     run = store.get_run(args.run_id)  # backfill must not clobber a finished run's status
-    print(softfilter_run(store, args.run_id, extract_cfg=cfg.get("extract", {})))
+    # Mirror the resume runner exactly. Without enabled_filters this pass CLEARS the existing
+    # soft_filters rows and rewrites them with no warning tags, so running the stage by hand
+    # silently stripped every advisory flag the run had (measured: warned=41 -> warned=0).
+    sf_cfg = cfg.get("soft_filter", {})
+    print(softfilter_run(store, args.run_id, extract_cfg=cfg.get("extract", {}),
+                         batch_size=sf_cfg.get("batch_size", DEFAULT_BATCH_SIZE),
+                         max_batch_chars=sf_cfg.get("max_batch_chars", DEFAULT_MAX_BATCH_CHARS),
+                         enabled_filters=cfg.get("hard_filters", [])))
     if run:
         store.set_stage(args.run_id, run["stage"], run["status"])
     store.close()

@@ -169,7 +169,7 @@ def competitors_run(store, run_id: str, saturation_per_competitor: float = 2.0,
         progress(0, len(ideas))
     payload = [_idea_payload(i, details.get(i["cluster_id"])) for i in ideas]
     cfg = research_cfg(extract_cfg, model, SYSTEM_PROMPT)
-    by_idea = {}
+    by_idea, batch_errors, last_error = {}, 0, ""
     for batch in _chunks(payload, batch_size):
         prompt = PROMPT_HEADER + json.dumps(batch, ensure_ascii=False)
         try:
@@ -178,7 +178,9 @@ def competitors_run(store, run_id: str, saturation_per_competitor: float = 2.0,
         except Exception as e:
             # One malformed batch must not sink the stage - those ideas just get no
             # competitors, and the brief stage will say so rather than invent a wedge.
-            print(f"  competitors batch failed, skipping: {str(e)[:120]}")
+            batch_errors += 1
+            last_error = str(e)[:200]
+            print(f"  competitors batch failed, skipping: {last_error}")
             continue
         for it in items:
             by_idea[str(it.get("id"))] = it.get("competitors") or []
@@ -222,7 +224,11 @@ def competitors_run(store, run_id: str, saturation_per_competitor: float = 2.0,
 
     store.set_stage(run_id, 10, "competitors-found")
     return {"ideas": ideas_with, "competitors": saved, "covered": len(ideas),
-            "rejected": rejected, "unverified": unverified}
+            "rejected": rejected, "unverified": unverified,
+            # Zero competitors reads the same whether the field really is empty or the model
+            # never answered. These two say which. Run pbfamily0001 reported "competitors=0
+            # ideas=0/25" and nobody could tell that every batch had failed.
+            "batch_errors": batch_errors, "llm_error": last_error}
 
 
 if __name__ == "__main__":

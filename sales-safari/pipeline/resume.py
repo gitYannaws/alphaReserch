@@ -147,6 +147,7 @@ class Runner:
         self.run_info = self.store.get_run(job_id) or {}
         self.cfg = _run_config(cfg, self.run_info)
         self.stopfile = ROOT / "db" / f"resume-{job_id}.stop"
+        self.degraded = []  # stage names that fell back to a stub; named again at the end
         self._log_fh = open(logfile, "a", encoding="utf-8", buffering=1)
         self.log("STATUS", f"resume runner attached to job {job_id}; log -> {logfile}")
 
@@ -161,6 +162,21 @@ class Runner:
 
     def _set_progress(self, stage: int, done: int, total: int, unit: str = ""):
         self.store.set_progress(self.job_id, stage, done, total, unit)
+
+    def _warn_degraded(self, stage_name: str, error: str, consequence: str):
+        """Say out loud that a stage fell back to its stub.
+
+        Stages 10a/9b/10b each catch their own LLM failure and continue with a keyword
+        template. That is the right behaviour -- one bad call must not sink a 40-hour run --
+        but it was silent. The stages print the reason and the detached runner captures only
+        its own logger, so run pbfamily0001's `ideas=25 (llm=0 template=25)` was the ONLY
+        clue that the whole idea chain had produced nothing real, and the run still reported
+        `status=done`. A degraded stage now names itself, the cause, and the cost.
+        """
+        if stage_name not in self.degraded:
+            self.degraded.append(stage_name)
+        self.log("WARN", f"stage {stage_name} DEGRADED to its fallback: {error} "
+                         f"-- consequence: {consequence}")
 
     def _check_cancelled(self):
         if not self.stopfile.exists():
@@ -339,9 +355,10 @@ class Runner:
 
     def _embed(self, store):
         from pipeline.embed import embed_run
-        embed_run(store, self.job_id, self.cfg.get("embed_model", "BAAI/bge-small-en-v1.5"),
-                  progress=lambda d, t: self._set_progress(4, d, t, "pains"))
-        return f"embeddings={self._count('embeddings')}"
+        result = embed_run(store, self.job_id,
+                           self.cfg.get("embed_model", "BAAI/bge-small-en-v1.5"),
+                           progress=lambda d, t: self._set_progress(4, d, t, "pains"))
+        return f"embeddings={result['embedded']}"
 
     def _cluster(self, store):
         from pipeline.cluster import cluster_run
@@ -384,15 +401,20 @@ class Runner:
                               verify_urls=cc.get("verify_urls", True),
                               url_timeout=cc.get("url_timeout", 8),
                               progress=lambda d, t: self._set_progress(10, d, t, "ideas"))
+        if cmp.get("llm_error"):
+            self._warn_degraded("competitors", cmp["llm_error"],
+                                f"{cmp.get('batch_errors')} batch(es) failed")
         return (f"competitors={cmp.get('competitors')} ideas={cmp.get('ideas')}"
                 f"/{cmp.get('covered')} rejected={cmp.get('rejected')}"
-                f" unverified={cmp.get('unverified')}")
+                f" unverified={cmp.get('unverified')}"
+                f" batch_errors={cmp.get('batch_errors')}")
 
     def _rank(self, store):
         from pipeline.s9_rank import rank_run
         rank_cfg = self.cfg.get("rank", {})
         r = rank_run(store, self.job_id,
                      solvable_weights=rank_cfg.get("solvable_weights"),
+                     allowed_solvability=rank_cfg.get("allowed_solvability"),
                      min_support=rank_cfg.get("min_support"),
                      progress=lambda d, t: self._set_progress(9, d, t, "themes"))
         return f"ranked={r['ranked']} dropped={r['dropped']}"
@@ -421,6 +443,9 @@ class Runner:
                       extract_cfg=self.cfg.get("extract", {}),
                       model=self.cfg.get("ideas", {}).get("model"),
                       progress=lambda d, t: self._set_progress(10, d, t, "ideas"))
+        if r.get("llm_error"):
+            self._warn_degraded("ideas", r["llm_error"],
+                                f"{r.get('from_template')} idea(s) are keyword templates")
         return (f"ideas={r['ideas']} (llm={r.get('from_llm')} "
                 f"template={r.get('from_template')} skipped={r.get('skipped')})")
 
@@ -431,7 +456,11 @@ class Runner:
                       extract_cfg=self.cfg.get("extract", {}),
                       model=bc.get("model", "claude-sonnet-5"),
                       progress=lambda d, t: self._set_progress(11, d, t, "briefs"))
-        return f"briefs={r['briefs']} with_review_evidence={r.get('with_review_evidence')}"
+        if r.get("llm_error"):
+            self._warn_degraded("brief", r["llm_error"],
+                                f"{r['briefs'] - (r.get('from_llm') or 0)} brief(s) are thin stubs")
+        return (f"briefs={r['briefs']} (llm={r.get('from_llm')}) "
+                f"with_review_evidence={r.get('with_review_evidence')}")
 
     def _report(self, store):
         from pipeline.s12_report import report_run
@@ -448,6 +477,7 @@ class Runner:
         rv_on = self.cfg.get("reviews", {}).get("enabled", True)
         pers_on = self.cfg.get("personas", {}).get("enabled", True)
         vf_on = self.cfg.get("verify", {}).get("enabled", True)
+        verify_advisory = not bool(self.cfg.get("verify", {}).get("require_verdict", False))
         br_on = self.cfg.get("brief", {}).get("enabled", True)
         # Idea chain order (changed 2026-07-20): rank -> draft idea -> competitors OF that
         # idea -> their low-star reviews -> brief built on the gap those reviews expose.
@@ -457,7 +487,7 @@ class Runner:
         return [
             (1,  "collect",     "collecting",             self._collect,     False, True),
             (3,  "extract",     "extracting",             self._extract,     False, True),
-            (3,  "verify",      "verifying",              self._verify,      True,  vf_on),
+            (3,  "verify",      "verifying",              self._verify,      verify_advisory, vf_on),
             (3,  "personas",    "personas",               self._personas,    True,  pers_on),
             (4,  "embed",       "embedding",              self._embed,       False, True),
             (5,  "cluster",     "clustering",             self._cluster,     False, True),
@@ -525,6 +555,14 @@ class Runner:
         self.log("NOTIFY", f"DONE job {self.job_id}: pains={self.store.count_pains(self.job_id)} "
                  f"clusters={self.store.count_clusters(self.job_id)} "
                  f"ideas={len(self.store.get_ideas(self.job_id))}")
+        # "done" must not read as "good". Run pbfamily0001 finished green with every idea a
+        # keyword template, no competitors, and 25 unproven briefs. Repeat the bad news last,
+        # where the operator actually looks.
+        if self.degraded:
+            self.log("NOTIFY", f"INCOMPLETE: job {self.job_id} finished with "
+                               f"{len(self.degraded)} stage(s) on their fallback path: "
+                               f"{', '.join(self.degraded)}. Re-run those stages before "
+                               f"trusting the report.")
         return 0
 
     def close(self):
