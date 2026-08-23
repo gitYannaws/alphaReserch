@@ -6,6 +6,7 @@ substring as evidence.
 """
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -53,13 +54,47 @@ def _span_bounds(text: str, span: str):
     return start, start + len(span)
 
 
+# Where the Claude CLI lives when PATH does not say. A Scheduled Task does not inherit the
+# interactive PATH, so `claude` resolves in a terminal and raises WinError 2 under schtasks --
+# which is how run pbfamily0001 came to ship 25 keyword-template "ideas": every Claude-backed
+# stage failed instantly, and the reason went to a print() the detached runner discarded.
+# Confirmed in db/resume-pbfamily0001.log on 2026-08-23:
+#   claude: [WinError 2] The system cannot find the file specified
+_CLAUDE_FALLBACK_DIRS = (
+    Path.home() / ".local" / "bin",
+    Path.home() / "AppData" / "Local" / "Programs" / "claude",
+    Path("/usr/local/bin"),
+)
+
+
+def _claude_binary() -> str:
+    """Resolve the Claude CLI, or say plainly that it is missing.
+
+    Never return a bare "claude" and let subprocess raise WinError 2 forty minutes into a
+    run: an executable that cannot be found is a configuration fault, and it must read as
+    one rather than as a mysterious provider error.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    for directory in _CLAUDE_FALLBACK_DIRS:
+        for name in ("claude.exe", "claude.cmd", "claude"):
+            candidate = directory / name
+            if candidate.exists():
+                return str(candidate)
+    raise RuntimeError(
+        "claude CLI not found on PATH. A Scheduled Task does not inherit the interactive "
+        "PATH; add the directory holding claude to the task's environment, or install it in "
+        + " or ".join(str(d) for d in _CLAUDE_FALLBACK_DIRS))
+
+
 def _call_claude(prompt: str, timeout: int = 180, model: str = "sonnet",
                  system_prompt: str = None) -> str:
     # `claude -p` otherwise inherits the coding-agent system prompt, which refuses
     # non-programming lookups ("Can't provide URLs for non-programming requests") - fatal
     # for the competitor/brief stages, which are market research, not coding. Replacing the
     # system prompt scopes the call to the analyst role those stages need.
-    args = ["claude", "-p", "--model", model, "--output-format", "json"]
+    args = [_claude_binary(), "-p", "--model", model, "--output-format", "json"]
     if system_prompt:
         args += ["--system-prompt", system_prompt]
     proc = subprocess.run(

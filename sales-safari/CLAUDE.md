@@ -192,6 +192,24 @@ webapp/
   advocacy / nonprofit / blog categories are rejected outright. Run `9af5b27db46e` had stored
   The Atlantic, VICE and Snopes as competitors and then mined 75 App Store reviews of them as
   "incumbent gaps".
+- **A Scheduled Task does not inherit the interactive PATH.** This was the ROOT CAUSE of the
+  whole `pbfamily0001` idea-chain failure and it took three sessions to find, because the
+  evidence was destroyed twice: `claude` lives in `~/.local/bin`, which resolves in a
+  terminal and does not exist under `schtasks`, so every Claude-backed stage died instantly
+  with `[WinError 2] The system cannot find the file specified` — and each stage reported
+  that through a `print()` the detached runner discards. Confirmed in
+  `db/resume-pbfamily0001.log` on 2026-08-23 when the guard restarted the run through the
+  task. Two defences now: `extract._claude_binary()` resolves the CLI itself (PATH, then
+  known install dirs) and raises an error naming the environment when it truly cannot, and
+  the `run-Passport*.ps1` wrappers prepend the bin directory. Never put a bare `"claude"` in
+  an argv again.
+- **A maintenance script must leave the run in a TERMINAL status.** `runs.status` values
+  outside `{done, reported, cancelled}` mean "unfinished" to `scripts/guard_pipeline.py`,
+  which then restarts the job through the Scheduled Task. A hand re-score that ended at
+  `status=ranked` had the guard relaunch the whole pipeline `--from 3` ten minutes later, and
+  the two runners collided on the SQLite file (`database is locked`), losing a 199-second
+  Claude call. `s7b_softfilter.py`'s `__main__` already gets this right — it stores the run
+  row and restores it afterwards. Copy that pattern in any backfill.
 - **A fallback must be LOUD.** Stages 10a/9b/10b each catch their own LLM failure and carry
   on with a keyword template, which is right — one bad call must not sink a 40-hour run. But
   they reported it with `print()`, and the detached runner captures only its own logger. Run
