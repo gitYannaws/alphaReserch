@@ -129,7 +129,14 @@ def _call_local(prompt: str, cfg: dict = None, timeout: int = 300) -> str:
     """Local model via an OpenAI-compatible /chat/completions endpoint.
     Works with Ollama (base_url http://localhost:11434/v1), LM Studio (:1234/v1),
     vLLM/llama.cpp (:8000/v1), etc. Model + endpoint come from the provider's config
-    block. Output still goes through the exact verbatim-span gate downstream."""
+    block. Output still goes through the exact verbatim-span gate downstream.
+
+    `api_style: ollama` switches to Ollama's native /api/chat instead. The only reason
+    that exists: reasoning models. Ollama 0.32 ignores every thinking switch on its
+    OpenAI-compat path -- `think`, `chat_template_kwargs.enable_thinking` and a `/no_think`
+    prompt suffix all still came back with a full `reasoning` block on qwen3:14b -- while
+    /api/chat honours `think: false`. Stage 3a wants JSON and verbatim spans, so paying for
+    a think-aloud on every batch is pure latency."""
     import requests  # lazy: only needed when a local provider is actually used
     cfg = cfg or {}
     base_url = (cfg.get("base_url") or "http://localhost:11434/v1").rstrip("/")
@@ -139,26 +146,47 @@ def _call_local(prompt: str, cfg: dict = None, timeout: int = 300) -> str:
     headers = {"Content-Type": "application/json"}
     if cfg.get("api_key"):
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
+    native = str(cfg.get("api_style") or "").lower() == "ollama"
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": cfg.get("temperature", 0),
         "stream": False,
     }
     # Raise the server's context window when it exposes one (Ollama honors options.num_ctx;
     # its default ~4096 silently truncates a multi-post batch). Harmless if the server ignores
     # it - char-budget batching in extract_run is the real guard against truncation.
+    options = {}
     if cfg.get("num_ctx"):
-        body["options"] = {"num_ctx": int(cfg["num_ctx"])}
+        options["num_ctx"] = int(cfg["num_ctx"])
+    if native:
+        # Native /api/chat takes temperature inside options, not at the top level.
+        options["temperature"] = cfg.get("temperature", 0)
+        url = base_url[: -len("/v1")] if base_url.endswith("/v1") else base_url
+        url += "/api/chat"
+    else:
+        body["temperature"] = cfg.get("temperature", 0)
+        url = f"{base_url}/chat/completions"
+    if options:
+        body["options"] = options
+    # Escape hatch for server-specific request fields, merged last so a provider block can
+    # override anything above (Ollama `think: false`, vLLM/llama.cpp
+    # `chat_template_kwargs.enable_thinking`). A new model needs a YAML edit, not code.
+    if isinstance(cfg.get("extra_body"), dict):
+        body.update(cfg["extra_body"])
     try:
-        resp = requests.post(f"{base_url}/chat/completions", json=body,
-                             headers=headers, timeout=cfg.get("timeout", timeout))
+        resp = requests.post(url, json=body, headers=headers,
+                             timeout=cfg.get("timeout", timeout))
     except requests.exceptions.RequestException as e:
         # connection refused / timeout -> fallback-eligible (see fallback_on markers)
         raise RuntimeError(f"local endpoint connection error: {e}")
     if resp.status_code != 200:
         raise RuntimeError(f"local endpoint HTTP {resp.status_code}: {resp.text[:400]}")
     data = resp.json()
+    if native:
+        content = (data.get("message") or {}).get("content")
+        if content is None:
+            raise RuntimeError(f"local endpoint returned no message content: {str(data)[:400]}")
+        return content
     try:
         return data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError):
@@ -255,6 +283,42 @@ def _spans_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return a[0] < b[1] and b[0] < a[1]
 
 
+def _salvage_json_objects(chunk: str) -> list:
+    """Recover the well-formed objects from an array that json.loads rejected.
+
+    A local model occasionally emits ONE bad item (an unquoted key, a stray quote) in an
+    otherwise valid array, and strict parsing throws away every good item alongside it.
+    Stage 7b lost all 619 themes of run 9af5b27db46e to a single bad batch that way. Walk
+    the text tracking string state, and parse each balanced top-level {...} span on its own
+    so only the malformed items are lost.
+    """
+    out, depth, start, in_str, esc = [], 0, None, False, False
+    for i, ch in enumerate(chunk):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    out.append(json.loads(chunk[start:i + 1]))
+                except ValueError:
+                    pass  # skip just this item
+                start = None
+    return out
+
+
 def _parse_json_array(raw: str):
     raw = raw.strip()
     if raw.startswith("```"):
@@ -263,7 +327,12 @@ def _parse_json_array(raw: str):
     start, end = raw.find("["), raw.rfind("]")
     if start == -1 or end == -1:
         return []
-    return json.loads(raw[start:end + 1])
+    chunk = raw[start:end + 1]
+    try:
+        return json.loads(chunk)
+    except ValueError:
+        # Partial recovery beats losing the whole batch; callers already tolerate a short array.
+        return _salvage_json_objects(chunk)
 
 
 _BAD_FIELD_VALUES = {"1", ".", "-", "n/a", "na", "none", "null", "unknown"}
@@ -302,13 +371,31 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
     docs = store.get_documents(run_id)
     if limit:
         docs = docs[:limit]
+    # Resume support. Every pass reads the whole run, so without a checkpoint a crash
+    # restarts at document 1 -- survivable on 3k documents, ruinous on 186k (~70 hours).
+    # store.clear_extracted_marks(run_id) forces a full re-extraction when the prompt or
+    # model changes and old results are no longer comparable.
+    total_docs = len(docs)
+    already = store.get_extracted_doc_ids(run_id)
+    skipped = 0
+    if already:
+        docs = [d for d in docs if d["id"] not in already]
+        skipped = total_docs - len(docs)
+        if skipped:
+            print(f"  resume: {skipped} of {total_docs} documents already extracted, skipping")
     by_id = {d["id"]: d for d in docs}
 
     ecfg = extract_cfg or {}
     mode = ecfg.get("providers_mode", "fallback")
     max_batch_chars = int(ecfg.get("max_batch_chars", 10000) or 10000)
     max_doc_chars = int(ecfg.get("max_doc_chars", 10000) or 10000)
-    kept, dropped, calls, failed_batches = 0, 0, 0, []
+    # Span-length floor. The exact-span gate proves the quote is REAL, not that it carries a
+    # claim: run pbfamily0001 stored 2,242 pains whose whole evidence was under 25 characters
+    # ("Oh Lordy.", "over priced"), 1,199 of which reached clustering and 219 of which sat
+    # inside top-100 ranked themes. Too short to embed meaningfully and too short to read as
+    # evidence. Deterministic and free, unlike the stage-3b judge.
+    min_span_chars = int(ecfg.get("min_span_chars", 25) or 0)
+    kept, dropped, dropped_short_span, calls, failed_batches = 0, 0, 0, 0, []
     provider_counts = {}
     done, bi = 0, 0
     for batch in _pack_batches(docs, batch_size, max_batch_chars, max_doc_chars):
@@ -344,6 +431,9 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
             if not doc or not span or not bounds:
                 dropped += 1
                 continue
+            if min_span_chars and len(span.strip()) < min_span_chars:
+                dropped_short_span += 1
+                continue
             # Union pools items from several models; skip a pain whose span overlaps one
             # already accepted for this doc so complementary models don't double-insert.
             if mode == "union" and any(
@@ -374,26 +464,32 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
                 "span_end": bounds[1],
             }):
                 kept += 1
+        # Checkpoint only a batch that got through the model. A failed batch stays
+        # unmarked above (it `continue`s before here) so the next pass retries it.
+        store.mark_docs_extracted(run_id, [d["id"] for d, _ in batch])
         done += len(batch)
         bi += 1
         if progress:
-            progress(done, len(docs), kept)
+            progress(done + skipped, total_docs, kept)
 
     if docs and calls == 0 and failed_batches:
         raise RuntimeError(f"pain extraction failed for all batches: {failed_batches[-1]}")
 
     return {
-        "docs": len(docs),
+        "docs": total_docs,
+        "extracted_now": len(docs),
+        "skipped_resume": skipped,
         "calls": calls,
         "kept": kept,
         "dropped": dropped,
+        "dropped_short_span": dropped_short_span,
         "failed_batches": len(failed_batches),
         "providers": provider_counts,
     }
 
 
 # ---- stage 3b: verify -----------------------------------------------------
-VERIFY_PROMPT_VERSION = "verify-v2"
+VERIFY_PROMPT_VERSION = "verify-v3"
 
 # The classifier's job is to TAG type; a separate config policy (verify.keep_types) decides
 # which types survive. That keeps the contested "is a social gripe a pain?" call a reversible
@@ -422,7 +518,8 @@ TYPES (choose one):
 - product_friction: the speaker's OWN friction doing a task - wasted time, a manual workaround,
   a tool that fails them.
 - wish: the speaker explicitly wants a tool/solution/feature that does not exist.
-- cost_complaint: the speaker's OWN money pain - something costs too much, priced out.
+- cost_complaint: the speaker's OWN money pain from a SPECIFIC product, service, or recurring
+  activity they cannot afford or keep paying for.
 - social_complaint: the speaker's OWN frustration about people, dating, places, culture, or
   society. A real felt pain (e.g. "dating here is exhausting", "everything's too expensive").
 - advice_opinion: advice or instruction to OTHERS, debate, a general opinion, or praise - the
@@ -433,6 +530,10 @@ TYPES (choose one):
 RULES:
 - Judge the SPEAKER'S OWN experience. "cold approach has a low success rate" = advice_opinion
   (telling others). "I wasted 3 hours on settings" = product_friction (own pain).
+- Keep product_friction only when a concrete tool, service, or task is failing the speaker.
+  A vague dislike of a country, group, or life situation is social_complaint, not friction.
+- Keep cost_complaint only when the costly thing is specific. "I don't have money" and "I need
+  to be rich first" are generic circumstances, not market pains: use advice_opinion.
 - Jokes/sarcasm/mockery are off_topic even if they touch a hardship: "Friday and I'm 3 martinis
   down" and "I follow just to laugh at the absurdity of it" = off_topic (spectating, not a pain).
 - A first-person gripe about the world IS a pain: "Sweden's expensive" = cost_complaint,
@@ -466,19 +567,26 @@ def keep_types_from_cfg(verify_cfg: dict = None) -> set:
 
 
 def classify_candidates(candidates: list, verify_cfg: dict = None, extract_cfg: dict = None,
-                        progress=None, should_stop=None) -> dict:
+                        progress=None, should_stop=None, require_verdict: bool = False) -> dict:
     """Store-independent core of stage 3b, reused by verify_run and by bench/score_gold.
 
     `candidates` = list of {id, span, summary, title, context}. Returns
-    {id: {"pain_type", "verified", "reason"}}. Recall-safe: a candidate the judge omits or
-    returns an unknown type for is marked verified=1 (kept) as "unjudged"; a whole batch that
-    errors yields no verdict for its ids (caller decides - verify_run leaves them NULL)."""
+    {id: {"pain_type", "verified", "reason"}}. In the default recall-safe mode, a candidate
+    the judge omits or returns an unknown type is marked verified=1 (kept) as "unjudged". In
+    precision mode, it remains unjudged so verify_run can stop before downstream stages."""
     verify_cfg = verify_cfg or {}
     extract_cfg = extract_cfg or {}
     keep_types = keep_types_from_cfg(verify_cfg)
     batch_size = int(verify_cfg.get("batch_size", 10) or 10)
+    providers = verify_cfg.get("providers")
+    if isinstance(providers, str):
+        providers = [providers]
+    elif providers:
+        providers = [str(value) for value in providers if str(value).strip()]
     provider = verify_cfg.get("provider", "claude")
     pcfg = {**extract_cfg, "claude_model": verify_cfg.get("model", "sonnet")}
+    if providers:
+        pcfg["providers"] = list(providers)
 
     out, kept = {}, 0
     for i in range(0, len(candidates), batch_size):
@@ -490,7 +598,8 @@ def classify_candidates(candidates: list, verify_cfg: dict = None, extract_cfg: 
                    for c in batch]
         prompt = VERIFY_PROMPT_HEADER + json.dumps(payload, ensure_ascii=False)
         try:
-            raw = _call_provider(provider, prompt, pcfg)
+            raw = (_call_extractor(prompt, pcfg)[0] if providers
+                   else _call_provider(provider, prompt, pcfg))
             verdicts = {v.get("id"): v for v in _parse_json_array(raw) if isinstance(v, dict)}
         except Exception as e:
             print(f"  verify batch {i//batch_size} failed: {e}")
@@ -499,8 +608,13 @@ def classify_candidates(candidates: list, verify_cfg: dict = None, extract_cfg: 
             v = verdicts.get(c["id"])
             ptype = (v.get("pain_type") if v else "").strip().lower()
             if ptype not in PAIN_TYPES:
-                out[c["id"]] = {"pain_type": "unjudged", "verified": 1, "reason": "no verdict"}
-                kept += 1
+                out[c["id"]] = {
+                    "pain_type": "unjudged",
+                    "verified": None if require_verdict else 1,
+                    "reason": "no verdict",
+                }
+                if not require_verdict:
+                    kept += 1
                 continue
             verified = 1 if ptype in keep_types else 0
             out[c["id"]] = {"pain_type": ptype, "verified": verified,
@@ -516,6 +630,7 @@ def verify_run(store, run_id: str, verify_cfg: dict = None, extract_cfg: dict = 
     """Stage 3b. Judge each candidate pain's type and apply the keep_types policy. Recall-safe:
     a candidate the judge fails to return, or a batch that errors, is left for a later pass
     (verified stays NULL = kept by get_pains) rather than silently dropped."""
+    verify_cfg = verify_cfg or {}
     rows = store.get_unverified_pains(run_id)
     candidates = [{
         "id": c["id"], "span": c["verbatim_span"],
@@ -525,25 +640,33 @@ def verify_run(store, run_id: str, verify_cfg: dict = None, extract_cfg: dict = 
         "context": _verify_context(c.get("raw_markdown"), c.get("span_start"),
                                    c.get("verbatim_span")),
     } for c in rows]
-    verdicts = classify_candidates(candidates, verify_cfg, extract_cfg, progress, should_stop)
+    require_verdict = bool(verify_cfg.get("require_verdict", False))
+    verdicts = classify_candidates(candidates, verify_cfg, extract_cfg, progress, should_stop,
+                                   require_verdict=require_verdict)
     kept, rejected, judged, by_type = 0, 0, 0, {}
+    incomplete = []
     for c in candidates:
         v = verdicts.get(c["id"])
-        if not v:
-            continue  # batch errored: leave verified NULL for a later pass (kept meanwhile)
+        if not v or v.get("verified") is None:
+            incomplete.append(c["id"])
+            continue  # leave NULL so a later verification retry can judge this candidate
         store.set_pain_verdict(c["id"], v["pain_type"], v["verified"], v["reason"])
         if v["pain_type"] != "unjudged":
             judged += 1
             by_type[v["pain_type"]] = by_type.get(v["pain_type"], 0) + 1
             kept += v["verified"]
             rejected += 1 - v["verified"]
+    if require_verdict and incomplete:
+        raise RuntimeError(
+            f"verification requires a verdict for every candidate; {len(incomplete)} remain unjudged"
+        )
     return {
         "candidates": len(candidates),
         "judged": judged,
         "kept": kept,
         "rejected": rejected,
         "by_type": by_type,
-        "failed_batches": len(candidates) - len(verdicts),
+        "failed_batches": len(incomplete),
     }
 
 

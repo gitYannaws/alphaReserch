@@ -20,6 +20,11 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None,
     report_path = Path(out_dir) / f"{run_id}.md"
     run = store.get_run(run_id) or {}
     all_ranked = store.get_ranked_clusters(run_id, include_dropped=True)
+    # `all_ranked` includes DROPPED themes, so its length is the theme count, not the ranked
+    # count. Reporting it as "of N ranked themes" overstated run pbfamily0001 by an order of
+    # magnitude: it printed "top 50 of 8925 ranked themes" when only 856 of those 8,925
+    # themes cleared min_support and solvability.
+    rankable = sum(1 for row in all_ranked if not row["dropped"])
     max_ranked_themes = max(0, int(max_ranked_themes or 0))
     ranked = all_ranked[:max_ranked_themes] if max_ranked_themes else all_ranked
     ideas = store.get_ideas(run_id)
@@ -78,8 +83,9 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None,
     lines.extend(["## Ranked Themes", ""])
     if len(ranked) < len(all_ranked):
         lines.extend([
-            f"Showing top {len(ranked)} of {len(all_ranked)} ranked themes. "
-            "Full rankings remain in the SQLite database.",
+            f"Showing top {len(ranked)} of {rankable} ranked themes "
+            f"({len(all_ranked)} themes total; {len(all_ranked) - rankable} were dropped "
+            "at rank). Full rankings remain in the SQLite database.",
             "",
         ])
     if not ranked:
@@ -99,11 +105,14 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None,
             f"- Demand parts: intensity {_fmt(row.get('pain_intensity'))}, "
             f"frequency {_fmt(row.get('frequency'))}, WTP {_fmt(row.get('willingness_to_pay'))}, "
             f"reach {_fmt(row.get('reachability'))}, recurrence {_fmt(row.get('recurrence_score'))}",
-            f"- Rank formula: demand {_fmt(row['demand_score'])} x persistence {_fmt(row['persistence_score'])} "
-            f"/ (1 + saturation {_fmt(row['saturation_score'])}) x solvable weight "
+            # Stage 9 stopped dividing by saturation on 2026-07-20 (it rewarded ignorance -
+            # see s9_rank.py). The report kept printing the retired divisor, so the arithmetic
+            # it showed did not reproduce the rank score beside it.
+            f"- Rank formula: demand {_fmt(row['demand_score'])} x persistence "
+            f"{_fmt(row['persistence_score'])} x solvable weight "
             f"{_fmt(row.get('solvable_weight'))}",
             f"- Persistence: {_fmt(row['persistence_score'])}",
-            f"- Saturation: {_fmt(row['saturation_score'])}",
+            f"- Saturation (display only, not in rank): {_fmt(row['saturation_score'])}",
             f"- Authors: {row['distinct_authors']}",
             f"- Scoring signals: intensity [{_signals(row, 'pain_intensity')}]; "
             f"WTP [{_signals(row, 'willingness_to_pay')}]",

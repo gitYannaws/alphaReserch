@@ -130,6 +130,19 @@ extract:
   # 4096 context with room for the prompt + output. Raise both if you raise qwen.num_ctx.
   max_batch_chars: 10000      # greedy char budget per batch (across posts)
   max_doc_chars: 10000        # a single longer post is capped to this (span still validates)
+  # Span-length floor. The exact-span gate proves a quote is REAL, not that it says
+  # anything. Run pbfamily0001 kept 2,242 pains whose entire evidence was under 25
+  # characters ("Oh Lordy.", "over priced"); 1,199 reached clustering and 219 landed
+  # inside top-100 ranked themes. Set 0 to disable.
+  min_span_chars: 25
+  # Measured 2026-08-16 on the synthetic benchmark, so this default is evidence-based:
+  #   qwen alone, hybrid corpus (1,500 real r/thepassportbros posts + planted themes,
+  #     run cb39389524e2):  81.2% recall / 98.5% precision, free, ~100% GPU locally
+  #   qwen + sonnet-5 UNION, clean-room (run dd952fff8d8f):
+  #     100% recall / 94.5% precision -- but runs a cloud model on EVERY batch
+  #     (~710 batches for a 4k-doc corpus) and its precision is WORSE.
+  # Union buys the last ~19 points of recall for real money. Keep qwen primary; switch to
+  # a union extractor in the GUI only for a corpus you mine once and cannot re-run.
   providers: [qwen, claude]   # local qwen primary; Claude fallback if endpoint down/errors
   # providers_mode: how `providers` is used.
   #   fallback (default) = first provider that succeeds wins (see comment above).
@@ -142,7 +155,11 @@ extract:
   claude_model: sonnet
   fallback_on: ["API 429", "429", "monthly usage limit", "usage limit",
                 "connection error", "connection refused", "timed out", "timeout"]
-  claude_timeout: 180
+  # Stage 3a sends small batches, but 10a/10b send ONE prompt covering all ~top_n themes,
+  # which at top_n 25 ran past 180s. A timeout is fallback-eligible, so it silently demoted
+  # idea synthesis to the local model and stored 25 keyword templates as ideas (llm=0
+  # template=25, run 9af5b27db46e 2026-07-30).
+  claude_timeout: 420
   codex_timeout: 300
   local_timeout: 300
   # Local extractors via any OpenAI-compatible server (Ollama / LM Studio / vLLM /
@@ -162,6 +179,21 @@ extract:
     model: qwen3:14b
     api_key: ""
     temperature: 0
+    num_ctx: 16384            # was missing: qwen3 ran on Ollama's ~4096 default, which
+                              # truncates multi-post batches. Any cached bench row for
+                              # `qwen3` from before 2026-07-27 was scored truncated.
+    api_style: ollama         # native /api/chat -- the only path where `think` is honoured
+    extra_body:
+      think: false            # reasoning off: 3a wants JSON + verbatim spans, not a monologue
+  qwen3_5:
+    base_url: http://localhost:11434/v1
+    model: qwen3.5:9b         # 6.6GB Q4; 256k ctx, fits 16GB with room for KV
+    api_key: ""
+    temperature: 0
+    num_ctx: 16384
+    api_style: ollama
+    extra_body:
+      think: false
   glm:
     base_url: http://localhost:11434/v1
     model: glm4:9b
@@ -225,23 +257,30 @@ extract:
 # each candidate pain's TYPE, then keep_types decides which survive to clustering. Runs only on
 # candidates (~10% of docs), so a strong model here is affordable. Rejected pains stay in the DB
 # (verified=0) and are withheld by get_pains; re-tune keep_types cheaply with store.reapply_verify_policy
-# (no LLM). A verify outage is non-fatal: unjudged candidates stay kept.
+# (no LLM). In this precision configuration, an incomplete verification stage stops before
+# embeddings so unjudged candidates cannot become themes.
 verify:
-  # ON: stage 3a runs prompt extract-v3, which casts a wide net on purpose and defers
-  # precision to this stage. Measured on the gold set: qwen2.5 scores 22% precision alone
-  # vs 60% with verify. See docs/model-extraction-benchmark-2026-07-18.md.
-  enabled: true
-  provider: claude          # judge via `claude -p`; claude=CLI Claude, or a local name (qwen/glm)
+  # Stage 3a intentionally casts a wide net; when enabled, this pass is required before a
+  # candidate may reach clustering. Measured on the gold set: qwen2.5 scored 22%
+  # precision alone vs 60% with verification.
+  #
+  # OFF since 2026-08-17 by explicit decision: one qwen pass, no second judge. The cost is
+  # stated above - expect roughly 3 noise candidates per 4. See
+  # docs/single-pass-extraction-2026-08-17.md. Turn both flags back to true to restore the
+  # precision gate; verify reads stored candidates, so it can run later on the same run_id
+  # WITHOUT repeating extraction.
+  enabled: false
+  # Must move with `enabled`. True makes stage 3a write verified=NULL and stop before
+  # embeddings; false writes verified=1 so pains reach stages 4-12 with no judge.
+  require_verdict: false
+  # Claude is the primary judge; Codex takes over on configured transient failures such as a
+  # usage-limit 429, so precision does not depend on a single provider being available.
+  providers: [claude, codex]
   model: sonnet             # claude_model for the judge; strong model, low call volume
   batch_size: 10            # candidates per judge call
-  # Which pain types survive to stages 4-12. Types: product_friction, wish, cost_complaint,
-  # social_complaint, advice_opinion, off_topic. The keep/drop line is GENUINE PAIN vs NOISE,
-  # not product-shaped vs not: a social gripe ("Sweden's expensive", dating frustration) is a
-  # real pain and can become a product ("product-shaped" is founder imagination, rarely in the
-  # raw quote). Solvability is judged later, at the THEME level (stage 7b soft-filter + idea
-  # gen), where a cluster reveals a market. So keep every genuine-pain type; reject only true
-  # noise (advice to others, jokes/off-topic). pain_type rides downstream as a weighting signal.
-  keep_types: [product_friction, wish, cost_complaint, social_complaint]
+  # Keep only a speaker's concrete product friction, explicit unmet wish, or own cost pain.
+  # Social grievances remain stored and auditable, but do not create themes or opportunities.
+  keep_types: [product_friction, wish, cost_complaint]
 
 # §4 embeddings — bge-small = fast/small; swap to BAAI/bge-large-en-v1.5 (1.3GB) for quality
 embed_model: BAAI/bge-small-en-v1.5
@@ -256,25 +295,23 @@ personas:
 cluster:
   min_cluster_size: 2
   cluster_selection_method: leaf   # leaf = finer themes; eom = few big blobs (old default)
-  min_cohesion: 0.55               # split any cluster looser than this (grab-bag guard)
+  # 0.55 never fired. Measured over run pbfamily0001's 8,925 themes, real cluster cohesion
+  # runs 0.855 (5th pct) / 0.908 (median) / 0.954 (95th pct), so nothing was ever below the
+  # bar -- including the one genuine grab-bag, a 580-member 493-author blob at cohesion
+  # 0.723 that had grouped on the word "she" and held "She fell 25 floors and didn't die
+  # immediately??". At 0.80 the guard is surgical: 4 of 3,707 eligible clusters split, and
+  # that blob becomes 12 coherent sub-themes of 18-92 members, all of them rankable.
+  # Do not go past ~0.82; at 0.85 it splits 287 clusters and at 0.88 it splits 1,375.
+  min_cohesion: 0.80               # split any cluster looser than this (grab-bag guard)
   # Embeddings can still mix different pains with the same broad travel/dating context.
-  # Audit clusters large enough to rank, split only genuinely shared buyer problems.
-  #
-  # OFF (2026-07-18) - MEASURED to destroy essentially all rankable themes. Sampling 40
-  # clusters that cleared stage-9 min_support and running the real auditor over them:
-  # 0 of 40 survived. It does not merely split - it OMITS members ("omit unrelated or
-  # one-off pains") and is called with min_cluster_size=2, so it emits groups of median
-  # size 2 while rank demands >=5 evidence and >=4 distinct authors. Unrankable by
-  # construction. Run 9af5b27db46e: 213 qualifying clusters before audit -> 8 after.
-  # Its purpose (stop grab-bag megaclusters) is already served by cluster_selection_method
-  # =leaf, under which the largest cluster here is 28 pains. min_support at rank remains
-  # the real quality gate. Re-enable only as a LABEL-ONLY pass that never drops members.
+  # The audit names a theme but must never DROP members. Full refine mode omits "one-off"
+  # pains and emits groups of median size 2, while rank demands >=5 evidence / >=4 authors,
+  # so every theme is unrankable by construction. Measured twice on run 9af5b27db46e:
+  # 0 of 40 sampled themes survived the first time, and re-confirmed 2026-07-30 --
+  # clustered pains 2753 -> 1756, largest theme 28 -> 13, and rank ended ranked=4
+  # dropped=615. Label-only keeps 213 rankable themes AND readable names; without the
+  # audit at all, labels fall back to a raw member quote ("Now I am really confused.").
   semantic_refine: true
-  # LABEL-ONLY: the audit names a theme but never drops members. Full refine mode was
-  # measured to destroy every rankable theme (0 of 40 sampled survived) because it omits
-  # "one-off" pains and emits groups of median size 2, while rank demands >=5 evidence /
-  # >=4 authors. Label-only keeps 213 rankable themes AND readable names - without it,
-  # labels fall back to a raw member quote ("Now I am really confused.").
   semantic_label_only: true
   audit_min_cluster_size: 5
 
@@ -308,7 +345,10 @@ hard_filters:
 # penalizes rank. solvable_weight down-weights themes a pure software product can't solve,
 # so social / hardware pains don't outrank software-shaped ones.
 rank:
-  solvable_weights: {yes: 1.0, partial: 0.6, no: 0.25, unknown: 0.5}
+  solvable_weights: {"yes": 1.0, "partial": 0.6, "no": 0.25, "unknown": 0.5}
+  # Themes that are not software-solvable, or remain unclassified, stay visible in the
+  # audit but never become ranked opportunities or idea seeds.
+  allowed_solvability: ["yes", "partial"]
   # Tiny/single-thread clusters stay in the database but do not become ranked
   # market opportunities or idea seeds.
   min_support: {evidence_count: 5, distinct_authors: 4, distinct_threads: 3}
@@ -367,7 +407,10 @@ discover:
 
 # §10 idea generation
 ideas:
-  top_n: 5
+  # 5 starved run 9af5b27db46e: 3 of the 5 came back as "not a product-shaped pain"
+  # refusals, leaving 2 usable ideas out of 642 themes. Deeper coverage also reaches the
+  # themes that rank below the top decile but carry the strongest author counts.
+  top_n: 25
   # LLM that synthesises ranked themes into product ideas (stage 10). Any Claude CLI model
   # alias/id. Blank ("") = fall back to the default extract.providers instead of a strong
   # model. Not hardcoded - change or clear it here.

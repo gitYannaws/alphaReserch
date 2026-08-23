@@ -3,6 +3,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -45,6 +47,12 @@ class _ExtractStore:
     def insert_pain(self, run_id, pain):
         self.saved.append(pain)
         return True
+
+    def get_extracted_doc_ids(self, run_id):
+        return set()
+
+    def mark_docs_extracted(self, run_id, doc_ids):
+        pass
 
 
 class _SoftFilterStore:
@@ -129,6 +137,67 @@ class QualityGateTests(unittest.TestCase):
         self.assertEqual(stats["dropped"], 1)
         self.assertEqual(store.saved[0]["document_id"], "pain")
 
+    def test_extract_drops_spans_too_short_to_be_evidence(self):
+        """A real quote can still be too short to say anything.
+
+        Run pbfamily0001 kept 2,242 pains whose whole evidence was under 25 characters
+        ("Oh Lordy.", "over priced"); 1,199 of them reached clustering.
+        """
+        store = _ExtractStore()
+        raw = json.dumps([
+            {
+                "post_id": "advice",
+                "complaint": "Phones get stolen.",
+                "workflow_pain": "",
+                "workaround": "",
+                "wish": "",
+                "persona": "traveler",
+                "verbatim_span": "This tracks.",          # 12 chars: real span, no content
+            },
+            {
+                "post_id": "pain",
+                "complaint": "Wire fees are repeated and costly.",
+                "workflow_pain": "",
+                "workaround": "",
+                "wish": "",
+                "persona": "traveler",
+                "verbatim_span": "I hate paying wire fees every time I move money.",
+            },
+        ])
+        original = extract._call_extractor
+        extract._call_extractor = lambda prompt, cfg: (raw, "test")
+        try:
+            stats = extract.extract_run(store, "run", batch_size=2,
+                                        extract_cfg={"min_span_chars": 25})
+        finally:
+            extract._call_extractor = original
+
+        self.assertEqual(stats["kept"], 1)
+        self.assertEqual(stats["dropped_short_span"], 1)
+        self.assertEqual(store.saved[0]["document_id"], "pain")
+
+    def test_extract_span_floor_is_disablable(self):
+        store = _ExtractStore()
+        raw = json.dumps([{
+            "post_id": "advice",
+            "complaint": "Phones get stolen.",
+            "workflow_pain": "",
+            "workaround": "",
+            "wish": "",
+            "persona": "traveler",
+            "verbatim_span": "This tracks.",
+        }])
+        original = extract._call_extractor
+        extract._call_extractor = lambda prompt, cfg: (raw, "test")
+        try:
+            stats = extract.extract_run(store, "run", batch_size=2,
+                                        extract_cfg={"min_span_chars": 0})
+        finally:
+            extract._call_extractor = original
+
+        self.assertEqual(stats["kept"], 1)
+        self.assertEqual(stats["dropped_short_span"], 0)
+
     def test_softfilter_batches_large_theme_sets(self):
         clusters = [
             {
@@ -196,6 +265,18 @@ class QualityGateTests(unittest.TestCase):
             cluster._call_extractor = original
 
         self.assertEqual(groups, [(["language-1", "language-2"], "Language translation failures")])
+
+    def test_duplicate_semantic_labels_are_coalesced(self):
+        groups, merges = cluster._merge_duplicate_labels([
+            (np.array([0, 1]), "Dating-app match quality"),
+            (np.array([2]), "  dating-app match quality  "),
+            (np.array([3]), "Payment verification failures"),
+        ])
+
+        self.assertEqual(merges, 1)
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0][0].tolist(), [0, 1, 2])
+        self.assertEqual(groups[0][1], "Dating-app match quality")
 
     def test_idea_generation_city_fallback_has_consistent_shape(self):
         title, pitch, permalink = _idea_for({

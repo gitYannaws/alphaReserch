@@ -15,6 +15,12 @@ from .extract import _call_extractor, _parse_json_array
 
 _EPS = 1e-9
 DEFAULT_AUDIT_MIN_CLUSTER_SIZE = 5
+# The audit prompt shows its output shape with a literal example label. A model that has
+# nothing to say sometimes echoes that example back instead of naming the theme, and the
+# name was stored verbatim: run pbfamily0001's largest cluster (580 members, 493 authors)
+# was titled "specific shared customer problem". An echoed placeholder is NOT a label -
+# reject it so the theme falls back to a representative member quote.
+_PLACEHOLDER_LABELS = {"specific shared customer problem", "label", "id", "pain_ids"}
 
 _SEMANTIC_AUDIT_PROMPT = """You are checking whether an embedding cluster contains ONE specific customer problem.
 
@@ -132,9 +138,30 @@ def _semantic_groups(store, pain_ids: list[str], extract_cfg: dict,
             continue
         assigned.update(members)
         label = " ".join(str(group.get("label") or "").split())[:120]
-        if label:
-            refined.append((members, label))
+        # Keep the GROUP either way - only the name is untrustworthy. An empty label falls
+        # back to a representative member quote downstream, which is a worse name but a
+        # true one, and no pain is lost to a bad label.
+        if label.casefold() in _PLACEHOLDER_LABELS:
+            label = ""
+        refined.append((members, label))
     return refined
+
+
+def _merge_duplicate_labels(groups: list[tuple[np.ndarray, str]]) -> tuple[list, int]:
+    """Coalesce separately discovered groups only when the semantic audit names them alike."""
+    merged, by_label, merges = [], {}, 0
+    for part, label in groups:
+        key = " ".join(str(label or "").casefold().split())
+        if key and key in by_label:
+            index = by_label[key]
+            existing_part, existing_label = merged[index]
+            merged[index] = (np.concatenate((existing_part, part)), existing_label)
+            merges += 1
+            continue
+        if key:
+            by_label[key] = len(merged)
+        merged.append((part, label))
+    return merged, merges
 
 
 def cluster_run(store, run_id: str, min_cluster_size: int = 2,
@@ -145,14 +172,8 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
                 extract_cfg: dict = None,
                 progress=None,
                 semantic_label_only: bool = False) -> dict:
-    """`semantic_label_only` = use the audit ONLY to name a theme, never to drop members.
-
-    Measured 2026-07-18: the full audit does not merely split - it omits pains it considers
-    one-off, emitting groups of median size 2 while rank demands >=5 evidence / >=4 authors.
-    Sampling 40 clusters that cleared min_support, 0 survived it. But the audit is also what
-    produced readable theme labels; without it labels fall back to a raw member quote
-    ("Now I am really confused."). Label-only keeps the names and keeps every member.
-    """
+    """Cluster verified pain candidates; the semantic audit may label only or retain
+    only coherent buyer-problem groups, depending on `semantic_label_only`."""
     rows = store.get_embeddings(run_id)
     if len(rows) < min_cluster_size:
         store.clear_clusters(run_id)
@@ -213,6 +234,7 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
                 continue
         final.append((part, label))
 
+    final, duplicate_merges = _merge_duplicate_labels(final)
     store.clear_clusters(run_id)
     for lab, (part, refined_label) in enumerate(final):
         pids = [ids[i] for i in part]
@@ -226,5 +248,5 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
     return {
         "clusters": len(final), "noise": int(noise), "split_megaclusters": split_count,
         "semantic_audited": audited, "semantic_splits": semantic_splits,
-        "semantic_rejected": semantic_rejected,
+        "semantic_rejected": semantic_rejected, "duplicate_merges": duplicate_merges,
     }
