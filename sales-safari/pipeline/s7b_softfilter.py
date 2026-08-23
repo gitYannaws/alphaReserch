@@ -143,8 +143,16 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
             # ranked=0 dropped=619 from one JSONDecodeError).
             print(f"  softfilter batch of {len(batch)} failed: {str(e)[:160]}")
             continue
+        # Trust only ids we actually asked about. A model that echoes an id from an earlier
+        # batch -- or invents one -- would otherwise stamp its verdict onto a theme nobody
+        # asked about: run pbfamily0001 landed verdicts on 2 themes stage 7b had skipped.
+        # Harmless there (both failed min_support anyway) but it is a verdict on the wrong
+        # theme, which is exactly what this stage must never produce.
+        asked = {str(t["id"]) for t in batch}
         for it in parsed:
-            items[str(it.get("id"))] = it
+            tid = str(it.get("id"))
+            if tid in asked:
+                items[tid] = it
 
     counts, classified, flagged = {}, 0, 0
     for i, cluster in enumerate(clusters, start=1):

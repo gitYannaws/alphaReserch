@@ -100,6 +100,42 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(stats["classified"], 2)
 
 
+class VerdictsLandOnTheRightTheme(unittest.TestCase):
+    """A verdict for an id we did not ask about must be discarded, not stored.
+
+    Run pbfamily0001 stored verdicts on 2 themes stage 7b had skipped: the model answered
+    with ids that were not in its batch and the code took them at face value. Both failed
+    min_support anyway, so nothing broke -- but it is a verdict on the wrong theme, which is
+    the one thing this stage must never produce.
+    """
+
+    def test_an_id_we_never_asked_about_is_ignored(self):
+        asked = _theme("asked", 6, 5, 3)
+        skipped = _theme("skipped", 2, 2, 1)
+        store = _Store([asked, skipped])
+
+        def fake(prompt, cfg):
+            import json as _json
+            return (_json.dumps([
+                {"id": "asked", "solvable": "yes", "confidence": 0.9, "reason": "ok"},
+                {"id": "skipped", "solvable": "no", "confidence": 0.9, "reason": "echoed"},
+                {"id": "invented", "solvable": "yes", "confidence": 1.0, "reason": "made up"},
+            ]), "test")
+
+        original = s7b_softfilter._call_extractor
+        s7b_softfilter._call_extractor = fake
+        try:
+            stats = s7b_softfilter.softfilter_run(store, "run", {}, min_support=SUPPORT)
+        finally:
+            s7b_softfilter._call_extractor = original
+
+        self.assertEqual(store.rows["asked"]["solvable"], "yes")
+        self.assertEqual(store.rows["skipped"]["solvable"], "not_evaluated",
+                         "an echoed verdict must not overwrite a theme we skipped")
+        self.assertEqual(stats["classified"], 1)
+        self.assertNotIn("invented", store.rows)
+
+
 class SupportRuleIsShared(unittest.TestCase):
     def test_7b_and_rank_agree_on_what_is_rankable(self):
         for theme, expect_rankable in ((_theme("a", 6, 5, 3), True),
