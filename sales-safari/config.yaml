@@ -117,6 +117,16 @@ collection:
 # Set per-seed only when you deliberately want to narrow one board's threads.
 keywords: []
 
+# Claude CLI budget guardrail: caps automated Claude CLI calls to <=20% of your hourly plan
+# and enforces a pacing delay between calls. When the hourly allowance is reached, the pipeline
+# seamlessly falls back to alternate configured providers (local qwen, codex, etc.) without dying.
+claude_guardrail:
+  enabled: true
+  max_calls_per_hour: 8              # 20% budget cap (e.g. 8 calls per rolling hour)
+  min_call_interval_seconds: 10.0   # minimum spacing between calls to prevent burst spikes
+  budget_window_seconds: 3600       # 1-hour rolling window
+  state_file: db/claude_usage.json
+
 # §3 pain extraction
 # providers = ordered try-list. First that succeeds wins; a fallback-eligible error
 # (see fallback_on) advances to the next. The GUI "Extractor" dropdown overrides this
@@ -143,7 +153,15 @@ extract:
   #     (~710 batches for a 4k-doc corpus) and its precision is WORSE.
   # Union buys the last ~19 points of recall for real money. Keep qwen primary; switch to
   # a union extractor in the GUI only for a corpus you mine once and cannot re-run.
-  providers: [qwen, claude]   # local qwen primary; Claude fallback if endpoint down/errors
+  # LOCAL ONLY. Claude was removed from this list on 2026-08-23: it is the user's own
+  # subscription, and the pipeline is not a small consumer of it -- a full stage-3b verify
+  # pass over run pbfamily0001 is ~7,300 calls, and a usage limit did stop one mid-job.
+  # Claude used to sit here as a fallback for when the local endpoint fails. It fired
+  # silently on 2026-08-23 when Ollama read-timed-out during extraction. Extraction now
+  # FAILS instead, which is the point: a dead local endpoint is an operator problem, not
+  # something to paper over by spending the plan. Fix Ollama and re-run -- extraction is
+  # checkpointed (extract_seen), so a retry resumes rather than restarting.
+  providers: [qwen]
   # providers_mode: how `providers` is used.
   #   fallback (default) = first provider that succeeds wins (see comment above).
   #   union              = run EVERY provider, pool + dedup their pains by span overlap.
@@ -152,8 +170,11 @@ extract:
   #     Costs more latency, and cloud providers in the list bill on every batch.
   #     For a free recall boost set: providers: [qwen, qwen3]  +  providers_mode: union
   providers_mode: fallback
-  claude_model: sonnet
+  # Unused while `providers` is local-only. Kept so re-adding a cloud provider is one edit,
+  # not a hunt. Do NOT re-add one without asking: see the note above `providers`.
+  claude_model: ""
   fallback_on: ["API 429", "429", "monthly usage limit", "usage limit",
+                "hourly budget exceeded", "budget limit", "budget capped",
                 "connection error", "connection refused", "timed out", "timeout"]
   # Stage 3a sends small batches, but 10a/10b send ONE prompt covering all ~top_n themes,
   # which at top_n 25 ran past 180s. A timeout is fallback-eligible, so it silently demoted
@@ -275,8 +296,8 @@ verify:
   require_verdict: false
   # Claude is the primary judge; Codex takes over on configured transient failures such as a
   # usage-limit 429, so precision does not depend on a single provider being available.
-  providers: [claude, codex]
-  model: sonnet             # claude_model for the judge; strong model, low call volume
+  providers: [qwen]
+  model: ""                 # unused while providers is local-only
   batch_size: 10            # candidates per judge call
   # Keep only a speaker's concrete product friction, explicit unmet wish, or own cost pain.
   # Social grievances remain stored and auditable, but do not create themes or opportunities.
@@ -413,7 +434,7 @@ competitors:
   # 9af5b27db46e qwen2.5:14b found competitors for 8 of 642 themes and named mostly
   # magazines. Only ~top_n ideas are covered now, so a strong model is cheap. Blank ("")
   # falls back to the run's own extract.providers.
-  model: claude-sonnet-5
+  model: ""                 # blank = use extract.providers (local qwen), not the Claude plan
   # Grounding gate: every candidate's URL must answer over HTTP or it is dropped. This is
   # what stops hallucinated products, since the model names them from memory.
   verify_urls: true
@@ -424,7 +445,7 @@ competitors:
 # no surviving quote are flagged has_review_evidence=false rather than being padded.
 brief:
   enabled: true
-  model: claude-sonnet-5
+  model: ""                 # blank = use extract.providers (local qwen), not the Claude plan
 
 # §9.6 review mining: pull 1-2 star app-store reviews of each competitor via free public
 # Apple endpoints (Search API + customer-reviews RSS). No key, no scraping. Advisory.
@@ -452,7 +473,7 @@ ideas:
   # LLM that synthesises ranked themes into product ideas (stage 10). Any Claude CLI model
   # alias/id. Blank ("") = fall back to the default extract.providers instead of a strong
   # model. Not hardcoded - change or clear it here.
-  model: claude-sonnet-5
+  model: ""                 # blank = use extract.providers (local qwen), not the Claude plan
 
 # §12 report output
 report_dir: reports

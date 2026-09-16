@@ -45,7 +45,7 @@ LABELS = Path("db/gold-labels.json")
 OUT = Path("db/gold-results.json")
 CFG_ALL = yaml.safe_load(open("config.yaml", encoding="utf-8"))
 CFG = CFG_ALL["extract"]
-LOCAL_BLOCK = {"qwen2.5": "qwen", "qwen3": "qwen3"}
+LOCAL_BLOCK = {"qwen2.5": "qwen", "qwen3": "qwen3", "qwen3.5": "qwen3_5"}
 
 
 def wilson(k: int, n: int):

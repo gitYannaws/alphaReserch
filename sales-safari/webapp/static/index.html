@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sales Safari</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root{--bg:#101114;--panel:#17191f;--line:#2a2e38;--fg:#e8eaee;--mut:#8f98a8;--acc:#f2734e;--ok:#4fb06d;--err:#f05d5e;}
   *{box-sizing:border-box}
@@ -108,9 +109,74 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   .scorebits summary{cursor:pointer;color:var(--acc)}
   .scorebits code{color:#cfd3dc}
   .warnflag{display:inline-block;margin:4px 4px 0 0;padding:2px 7px;border:1px solid var(--err);border-radius:12px;color:var(--err);font-size:11px}
+  /* Signal row under a theme: six sub-score columns, the theme's own months, trust badges. */
+  .sig{display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap}
+  .sig svg{display:block;overflow:visible;flex:none}
+  .glyph rect,.spark rect{fill:#3987e5}
+  .glyph .track,.spark .track{fill:#23262e}
+  .tb{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;color:var(--mut);border:1px solid var(--line);white-space:nowrap;font-variant-numeric:tabular-nums;cursor:help}
+  .tb.warn{background:#332414;color:#e0a458;border-color:#7a5320}
+  .tb.ok{background:#16301f;color:#5fd08a;border-color:#2c6b45}
   .help{margin-top:10px;color:var(--mut);font-size:13px}
   .quote{color:#f4a089}
   /* Pains table: fixed layout so one long theme label can't hog the row. */
+  /* Bars are plain divs on purpose: a chart library would be a CDN dependency for what is
+     a sorted list with one number per row. */
+  .wbar{display:grid;grid-template-columns:190px 1fr 96px;align-items:center;gap:10px;
+        padding:3px 0;cursor:pointer}
+  .wbar:hover .wbar-term{text-decoration:underline}
+  .wbar.on .wbar-term{font-weight:700}
+  .wbar-term{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+  /* display:block on the fill is load-bearing: a <span> is inline, and an inline box
+     ignores width and height, so the bar rendered as an empty track. */
+  .wbar-track{display:block;background:#1b1f27;border-radius:3px;height:14px;overflow:hidden}
+  .wbar-fill{display:block;background:#3d7dff;height:14px;border-radius:3px;min-width:2px}
+  .wbar.gram2 .wbar-fill{background:#8a63d2}
+  .wbar-num{font-size:12px;text-align:right;white-space:nowrap}
+  /* Chart tokens. The app is dark-only, so one set of values, stated against the card
+     surface the charts actually sit on (--panel), not a generic dark. The blue ramp is
+     one hue light-to-dark for a magnitude encoding; it was validated against #17191f. */
+  .viz{--viz-surface:#17191f;--viz-ink:#e8eaee;--viz-mut:#8f98a8;--viz-grid:#23262e;
+       --viz-axis:#333844;--viz-series:#3987e5;
+       --viz-s1:#184f95;--viz-s2:#256abf;--viz-s3:#3987e5;--viz-s4:#6da7ec;--viz-s5:#b7d3f6}
+  .viz{margin:0 0 26px}
+  .viz:last-child{margin-bottom:0}
+  .viz h4{margin:0 0 2px;font-size:13px;font-weight:600;color:var(--fg)}
+  .viz .sub{margin:0 0 8px;font-size:12px;color:var(--mut)}
+  .viz svg{display:block;width:100%;height:auto;overflow:visible}
+  .viz text{font:11px system-ui,Segoe UI,sans-serif;fill:var(--viz-mut)}
+  .viz .gridline{stroke:var(--viz-grid);stroke-width:1}
+  .viz .axisline{stroke:var(--viz-axis);stroke-width:1}
+  /* The 2px ring is the surface colour, so overlapping dots stay countable. */
+  .viz .dot{stroke:var(--viz-surface);stroke-width:2;cursor:pointer}
+  .viz .dot:hover{stroke:var(--fg)}
+  .viz .bar{fill:var(--viz-series);cursor:pointer}
+  .viz .bar:hover{fill:var(--viz-s4)}
+  .viz .stack{cursor:help}   /* hover explains it; there is nothing to click through to */
+  .viz .stack:hover{filter:brightness(1.18)}
+  .viz code{background:#0c0d11;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:11px}
+  .viz .barval{fill:var(--fg);font-variant-numeric:tabular-nums}
+  .viz .area{fill:var(--viz-series);opacity:.10}
+  .viz .line{fill:none;stroke:var(--viz-series);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  .viz .peak{fill:var(--viz-surface);stroke:var(--viz-series);stroke-width:2}
+  .viz .crosshair{stroke:var(--viz-axis);stroke-width:1}
+  .viz .prize{fill:var(--ok);opacity:.05}
+  .viz .split{stroke:var(--viz-axis);stroke-width:1;stroke-dasharray:4 4}
+  .viz .corner{font-size:10px;letter-spacing:.08em;fill:var(--viz-mut);opacity:.8}
+  .viz .callout{fill:var(--fg);font-weight:700;cursor:pointer;paint-order:stroke;stroke:var(--viz-surface);stroke-width:3px;stroke-linejoin:round}
+  .viz .callout:hover{fill:var(--acc)}
+  .viz .names{display:grid;grid-template-columns:1fr 1fr;gap:3px 18px;list-style:none;margin:10px 0 0;padding:0}
+  .viz .names li{font-size:12px;color:var(--fg);cursor:pointer;line-height:1.35}
+  .viz .names li:hover{color:var(--acc)}
+  .viz .names b{display:inline-block;min-width:22px;color:var(--acc)}
+  .viz .names .k{color:var(--mut)}
+  .vizkey{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--mut);margin-top:8px;flex-wrap:wrap}
+  .vizkey i{display:inline-block;width:16px;height:10px;border-radius:2px}
+  #vizTip{position:fixed;z-index:50;pointer-events:none;display:none;max-width:280px;
+          background:#0c0d11;border:1px solid var(--line);border-radius:6px;padding:7px 9px;
+          font-size:12px;line-height:1.45;color:var(--fg);box-shadow:0 6px 18px rgba(0,0,0,.5)}
+  #vizTip b{display:block;margin-bottom:3px}
+  #vizTip .k{color:var(--mut)}
   #painsCard table{table-layout:fixed}
   #painsCard td{overflow-wrap:anywhere;white-space:normal}  /* override .dim nowrap so theme wraps */
   #painsCard th:nth-child(1),#painsCard td:nth-child(1){width:15%}
@@ -126,6 +192,13 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
      (and squashing the status select down to an unusable sliver) */
   .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .actions select,.actions input{min-width:90px}
+  /* Sortable headers. The caret is always in the flow, transparent when the column is not
+     the active one, so switching columns never shifts the header text sideways. */
+  th[data-sort]{cursor:pointer;user-select:none;white-space:nowrap}
+  th[data-sort]:hover{color:var(--fg)}
+  th[data-sort] .caret{margin-left:5px;font-size:10px;color:transparent}
+  th[data-sort].sorted{color:var(--fg)}
+  th[data-sort].sorted .caret{color:var(--acc)}
   .pager{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
   .pager button:disabled{opacity:.35;cursor:default}
   .modeswitch{display:flex;margin-bottom:14px;width:max-content;border:1px solid var(--line);border-radius:6px;overflow:hidden}
@@ -262,7 +335,7 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
       </div>
     </div>
     <div class="table-wrap">
-    <table><thead><tr><th>Run</th><th>Seed</th><th>Status</th><th>Updated</th><th>Counts</th><th></th></tr></thead>
+    <table><thead><tr data-sortgroup="runs"><th data-sort="job_id">Run</th><th data-sort="seed_url">Seed</th><th data-sort="status">Status</th><th data-sort="updated_at">Updated</th><th data-sort="pain_count">Counts</th><th></th></tr></thead>
     <tbody id="runs"></tbody></table>
     </div>
     <div class="pager" id="runsPager">
@@ -277,15 +350,56 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   <div class="card" id="rankingsCard" style="display:none">
     <label>Ranked themes</label>
     <div class="table-wrap">
-    <table><thead><tr><th>Rank</th><th>Theme</th><th>Score</th><th>Demand</th><th>Recur</th><th>Persist</th><th>Sat.</th><th>Authors</th></tr></thead>
+    <table><thead><tr data-sortgroup="rank"><th data-sort="rank">Rank</th><th data-sort="label">Theme</th><th data-sort="rank_score">Score</th><th data-sort="demand_score">Demand</th><th data-sort="recurrence_score">Recur</th><th data-sort="persistence_score">Persist</th><th data-sort="saturation_score">Sat.</th><th data-sort="distinct_authors">Authors</th></tr></thead>
     <tbody id="rankings"></tbody></table>
     </div>
+    <div class="pager" id="rankPager">
+      <span class="dim" id="rankPageInfo"></span>
+      <div class="actions">
+        <select id="rankSize" style="width:110px"><option value="20" selected>20 / page</option><option value="50">50 / page</option><option value="100">100 / page</option></select>
+        <button id="rankPrev" class="secondary">&larr; Prev</button>
+        <button id="rankNext" class="secondary">Next &rarr;</button>
+      </div>
+    </div>
     <div class="solvlegend"><span><span class="solv yes"></span>software-solvable</span><span><span class="solv partial"></span>partial (needs hardware/service)</span><span><span class="solv no"></span>not software</span><span><span class="solv unknown"></span>unclassified</span></div>
+    <div class="solvlegend"><span>Signal row: the six columns are intensity &middot; frequency &middot; WTP &middot; reach &middot; recurrence &middot; persistence, each 0&ndash;10.
+      The sparkline is this theme&rsquo;s pains per month across the whole run. Badges: pains per author, subreddits, first&rarr;last month, workarounds.
+      Amber means check it before you trust the row.</span></div>
   </div>
 
   <div class="card" id="ideasCard" style="display:none">
     <label>Product ideas</label>
     <div class="grid" id="ideas"></div>
+  </div>
+
+  <div class="card" id="vizCard" style="display:none">
+    <label>Signal charts</label>
+    <div class="viz" id="vizThemes"></div>
+    <div class="viz" id="vizSentiment"></div>
+    <div class="viz" id="vizIdeas"></div>
+    <div class="viz" id="vizTime"></div>
+    <div class="viz" id="vizPersonas"></div>
+  </div>
+
+  <div class="card" id="wordsCard" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+      <label style="margin:0">Word ranking <span class="dim" id="wordsCount"></span></label>
+      <div class="actions">
+        <select id="wGram" style="width:130px">
+          <option value="">words + phrases</option>
+          <option value="1">words only</option>
+          <option value="2">phrases only</option>
+        </select>
+        <select id="wTop" style="width:110px">
+          <option value="30">top 30</option>
+          <option value="60" selected>top 60</option>
+          <option value="120">top 120</option>
+        </select>
+      </div>
+    </div>
+    <p class="dim" style="margin:0 0 10px">Ranked by how many <b>different authors</b> used the term, not by raw
+      count &mdash; the same yardstick the theme ranking uses. Click a bar to filter the pains below.</p>
+    <div id="wordBars"></div>
   </div>
 
   <div class="card" id="painsCard" style="display:none">
@@ -317,8 +431,16 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
       <button id="pClear" class="secondary" style="padding:4px 12px;font-size:12px">Clear</button>
     </div>
     <div class="table-wrap">
-    <table><thead><tr><th>Persona</th><th>Theme</th><th>Complaint / wish</th><th>Verbatim span</th><th>Source</th></tr></thead>
+    <table><thead><tr data-sortgroup="pain"><th data-sort="persona">Persona</th><th data-sort="theme">Theme</th><th data-sort="complaint">Complaint / wish</th><th data-sort="span">Verbatim span</th><th data-sort="source">Source</th></tr></thead>
     <tbody id="pains"></tbody></table>
+    </div>
+    <div class="pager" id="painPager">
+      <span class="dim" id="painPageInfo"></span>
+      <div class="actions">
+        <select id="pSize" style="width:110px"><option value="20" selected>20 / page</option><option value="50">50 / page</option><option value="100">100 / page</option></select>
+        <button id="painPrev" class="secondary">&larr; Prev</button>
+        <button id="painNext" class="secondary">Next &rarr;</button>
+      </div>
     </div>
   </div>
 
@@ -519,7 +641,7 @@ async function start(){
   const seed=$("seed").value.trim(); if(!seed) return;
   setRunControls("starting"); $("err").textContent="";
   ["statusCard"].forEach(id=>$(id).style.display="block");
-  ["rankingsCard","ideasCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
+  ["rankingsCard","ideasCard","vizCard","wordsCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
   $("badge").className="badge starting"; $("badge").textContent="starting";
   const r=await fetch("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({
@@ -597,14 +719,15 @@ async function tick(job){
   if(TERMINAL.has(j.status)){
     clearInterval(poll);
     setRunControls(j.status);
-    if(j.status!=="error"){ loadRankings(job, j); loadIdeas(job, j); loadPains(job, j); loadReport(job, j); }
+    if(j.status!=="error"){ loadRankings(job, j); loadIdeas(job, j); loadPains(job, j); loadViz(job); loadWords(job); loadReport(job, j); }
     loadRuns();
   }
 }
 
 async function loadRuns(){
   const q=encodeURIComponent($("fSeed").value.trim()), st=encodeURIComponent($("fStatus").value);
-  const r=await (await fetch(`/api/runs?limit=${RUN_PAGE_SIZE}&offset=${RUN_OFFSET}&q=${q}&status=${st}`)).json();
+  const so=`&sort=${encodeURIComponent(SORTS.runs.key)}&dir=${SORTS.runs.dir}`;
+  const r=await (await fetch(`/api/runs?limit=${RUN_PAGE_SIZE}&offset=${RUN_OFFSET}&q=${q}&status=${st}${so}`)).json();
   RUNS=r.items; RUNS_TOTAL=r.total;
   const sel=$("fStatus"), cur=sel.value;
   const statuses=[...new Set(RUNS.map(r=>r.status))].sort();
@@ -653,7 +776,7 @@ async function deleteRun(job,seed,status){
   }
   if($("statusCard").dataset.jobId===job){
     clearInterval(poll);
-    ["statusCard","rankingsCard","ideasCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
+    ["statusCard","rankingsCard","ideasCard","vizCard","wordsCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
   }
   loadRuns();
 }
@@ -662,7 +785,7 @@ async function openRun(job){
   clearInterval(poll);
   $("statusCard").dataset.jobId=job;
   ["statusCard"].forEach(id=>$(id).style.display="block");
-  ["rankingsCard","ideasCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
+  ["rankingsCard","ideasCard","vizCard","wordsCard","painsCard","reportCard"].forEach(id=>$(id).style.display="none");
   $("err").textContent="";
   await tick(job);
   // Keep polling live if the run is still active; tick() clears the interval on a
@@ -685,6 +808,98 @@ function warningHtml(flags){
   if(!flags || !flags.length) return "";
   return flags.map(f=>`<span class="warnflag" title="Advisory warning flag">${esc(f)}</span>`).join("");
 }
+/* ---- Signal row: the score decomposed, the theme's own months, and trust badges ---------
+   The rank score is one blended number. Six small columns show WHICH part carries it: a
+   theme high on frequency and floor-low on WTP is a vitamin; the reverse is a niche
+   painkiller. The sparkline is this theme's pains per month on the run's full month axis,
+   so one viral thread reads as one spike and a recurring pain reads as many bumps.
+   The badges are the rigor checks: pains per author (repeat posters inflate a theme),
+   subreddits (one community's quirk, in a merged run), first-last month (stale), and
+   workarounds (effort already spent: the strongest evidence a forum gives).
+   All of it comes from the rows /rankings and /cluster-details already send. */
+const SUB_DIMS=[["pain_intensity","intensity"],["frequency","frequency"],["willingness_to_pay","WTP"],
+                ["reachability","reach"],["recurrence_score","recurrence"],["persistence_score","persistence"]];
+function glyphHtml(r){
+  const w=9, gap=3, H=14, W=SUB_DIMS.length*(w+gap)-gap;
+  const cols=SUB_DIMS.map(([k,name],i)=>{
+    const v=Math.max(0, Math.min(10, Number(r[k]||0)));
+    const h=Math.max(1, v/10*H), x=i*(w+gap);
+    return `<rect class="track" x="${x}" y="0" width="${w}" height="${H}" rx="1"/>`
+      + `<rect x="${x}" y="${(H-h).toFixed(1)}" width="${w}" height="${h.toFixed(1)}" rx="1" data-tip="${esc(vizTipHtml(name,[["score", n(v)+" of 10"]]))}"/>`;
+  }).join("");
+  return `<svg class="glyph" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="sub-scores">${cols}</svg>`;
+}
+function monthSeq(a, b){                 // "2023-11" .. "2026-03", inclusive
+  const out=[]; let [y,m]=a.split("-").map(Number); const [y1,m1]=b.split("-").map(Number);
+  while(y<y1 || (y===y1 && m<=m1)){ out.push(`${y}-${String(m).padStart(2,"0")}`); if(++m>12){ m=1; y++; } }
+  return out;
+}
+function monthsBetween(a, b){
+  const [y,m]=a.split("-").map(Number), [y1,m1]=b.split("-").map(Number);
+  return (y1-y)*12+(m1-m);
+}
+function painMonths(pains){
+  return (pains||[]).map(p=>(p.created_at||"").slice(0,7)).filter(ym=>ym.length===7).sort();
+}
+/* The run's month axis. From the timeline once the charts have loaded; until then from the
+   themes on this page. loadViz redraws the table, which puts every sparkline on one axis. */
+function runMonthRange(){
+  if(VIZ && VIZ_JOB===RANK_JOB && VIZ.timeline && VIZ.timeline.length)
+    return [VIZ.timeline[0].month, VIZ.timeline[VIZ.timeline.length-1].month];
+  let lo=null, hi=null;
+  Object.values(RANK_BY_CLUSTER).forEach(ps=>painMonths(ps).forEach(ym=>{
+    if(!lo || ym<lo) lo=ym; if(!hi || ym>hi) hi=ym; }));
+  return lo ? [lo, hi] : null;
+}
+function sparkHtml(pains, range){
+  const W=120, H=14;
+  const ms=painMonths(pains);
+  const base=`<rect class="track" x="0" y="${H-1}" width="${W}" height="1"/>`;
+  if(!range || !ms.length)
+    return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">${base}</svg>`;
+  const months=monthSeq(range[0], range[1]);
+  const idx=new Map(months.map((m,i)=>[m,i]));
+  const counts=new Array(months.length).fill(0);
+  ms.forEach(ym=>{ const i=idx.get(ym); if(i!==undefined) counts[i]++; });
+  const max=Math.max(...counts,1), bw=W/months.length;
+  const active=counts.filter(c=>c>0).length;
+  const tip=vizTipHtml("pains per month", [["active", `${active} of ${months.length} months`],
+    ["first", ms[0]], ["last", ms[ms.length-1]], ["peak", `${max} in one month`]]);
+  // Columns, not a line: six pains over forty-nine months is a few ticks, and a line
+  // through them would invent a trend between them.
+  const bars=counts.map((c,i)=>{ if(!c) return "";
+    const h=Math.max(2, c/max*H);
+    return `<rect x="${(i*bw).toFixed(2)}" y="${(H-h).toFixed(1)}" width="${Math.max(1.2, bw-0.6).toFixed(2)}" height="${h.toFixed(1)}"/>`; }).join("");
+  return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="pains per month" data-tip="${esc(tip)}">${base}${bars}</svg>`;
+}
+function subOf(url){ const m=/\/r\/([^/?#]+)/i.exec(url||""); return m ? "r/"+m[1].toLowerCase() : null; }
+function trustHtml(r, pains, range){
+  const out=[];
+  const badge=(cls, txt, title, pairs)=>out.push(`<span class="tb${cls?" "+cls:""}" data-tip="${esc(vizTipHtml(title, pairs))}">${esc(txt)}</span>`);
+  const ratio=r.distinct_authors ? (r.size||0)/r.distinct_authors : 0;
+  badge(ratio>1.5 ? "warn" : "", `${ratio.toFixed(1)} per author`, "pains per author",
+    [["pains", r.size||0], ["authors", r.distinct_authors||0]].concat(ratio>1.5 ? [["flag", "above 1.5: a few posters carry this theme"]] : []));
+  if(!pains || !pains.length){ badge("", "…", "loading", [["evidence", "still loading"]]); return out.join(" "); }
+  const subs=new Map();
+  pains.forEach(p=>{ const s=subOf(p.thread_url||p.source_permalink); if(s) subs.set(s, (subs.get(s)||0)+1); });
+  if(subs.size){
+    const list=[...subs.entries()].sort((a,b)=>b[1]-a[1]);
+    const lone=subs.size===1 && RANK_MERGED;
+    badge(lone ? "warn" : "", `${subs.size} sub${subs.size===1?"":"s"}`, "subreddits",
+      list.map(([s,c])=>[s, `${c} pain${c===1?"":"s"}`]).concat(lone ? [["flag", "one community in a merged run"]] : []));
+  }
+  const ms=painMonths(pains);
+  if(ms.length){
+    const first=ms[0], last=ms[ms.length-1];
+    const stale=!!(range && monthsBetween(last, range[1])>12);
+    badge(stale ? "warn" : "", `${first} → ${last}`, "first and last pain",
+      [["first", first], ["last", last]].concat(stale ? [["flag", "nothing in the run's last 12 months"]] : []));
+  }
+  const wa=pains.filter(p=>(p.workaround||"").trim()).length;
+  if(wa) badge("ok", `${wa} workaround${wa===1?"":"s"}`, "workarounds",
+    [["pains with one", wa], ["why it matters", "effort already spent beats a stated wish"]]);
+  return out.join(" ");
+}
 function scoreBreakdownHtml(r){
   const b = r.rank_breakdown || {};
   const ev = r.scoring_evidence || {};
@@ -701,22 +916,62 @@ function scoreBreakdownHtml(r){
     <div>Saturation ${n(b.saturation_display_only ?? r.saturation_score)} (display only)</div>
   </details>`;
 }
+/* Evidence used to arrive for every theme at once. pbfamily0001 has 8,925 of them and
+   that one call was 22.8 MB, for the ~300 rows the table actually draws. Fetch the
+   evidence for the visible ids only, then redraw once it lands. */
+// 150 ids ~= a 3 KB query string. "Show all" on 8,925 themes would build a URL no server
+// accepts, so take a chunk per call; the redraw at the end asks for the next one.
+const DETAIL_CHUNK = 150;
+async function ensureDetails(job, ids){
+  const want=[...new Set(ids)].filter(id=>id && !(id in RANK_BY_CLUSTER)).slice(0, DETAIL_CHUNK);
+  if(!want.length) return false;
+  want.forEach(id=>{ RANK_BY_CLUSTER[id]=[]; });   // claim them so a redraw cannot refetch
+  const d=await (await fetch(`/api/run/${job}/cluster-details?ids=${encodeURIComponent(want.join(","))}`)).json();
+  (d||[]).forEach(c=>{ RANK_BY_CLUSTER[c.id]=c.pains||[]; });
+  return true;
+}
 async function loadRankings(job, runState=null){
-  const [rows, details]=await Promise.all([
-    (await fetch(`/api/run/${job}/rankings`)).json(),
-    (await fetch(`/api/run/${job}/cluster-details`)).json(),
-  ]);
+  const rows=await (await fetch(`/api/run/${job}/rankings`)).json();
   $("rankingsCard").style.display="block";
   if(!rows.length){
     const msg = runOutcomeMsg(runState || {});
     $("rankings").innerHTML = `<tr><td colspan="8" class="dim">${esc(msg || "No ranked themes were produced for this run.")}</td></tr>`;
+    RANKINGS = []; RANK_OFFSET = 0;
+    setPager("rank", 0, RANK_SIZE, 0);
     return;
   }
-  const byCluster={};
-  (details||[]).forEach(c=>{ byCluster[c.id]=c.pains||[]; });
-  $("rankings").innerHTML=rows.map(r=>`<tr>
+  RANK_JOB = job;
+  // A merged run pools several subreddits, so a theme from only one of them is a flag.
+  // A single-subreddit run has one by definition, and the flag would fire on every row.
+  RANK_MERGED = /^merged:/.test(String((runState||{}).seed||""));
+  RANKINGS = rows;
+  RANK_BY_CLUSTER = {};
+  RANK_OFFSET = 0;
+  renderRankings();
+}
+
+let RANKINGS = [], RANK_BY_CLUSTER = {}, RANK_JOB = null, RANK_MERGED = false;
+let RANK_OFFSET = 0, RANK_SIZE = 20;
+/* Themes are paged in the browser: /rankings is one small row per theme, so the whole
+   list is cheap to hold. The expensive half is the evidence, and ensureDetails fetches
+   that for the page on screen only. */
+function renderRankings(){
+  // Sorted here, not on the server: /rankings already sends the whole list, so a re-sort
+  // is a local array copy and costs no round trip.
+  const s=SORTS.rank;
+  const rows = s.key==="rank" && s.dir==="asc" ? RANKINGS : RANKINGS.slice().sort(cmpBy(s.key, s.dir));
+  if(RANK_OFFSET >= rows.length) RANK_OFFSET = Math.max(0, (Math.ceil(rows.length/RANK_SIZE)-1)*RANK_SIZE);
+  const page = rows.slice(RANK_OFFSET, RANK_OFFSET+RANK_SIZE);
+  setPager("rank", RANK_OFFSET, RANK_SIZE, rows.length);
+  if(RANK_JOB){
+    ensureDetails(RANK_JOB, page.map(r=>r.cluster_id)).then(got=>{ if(got) renderRankings(); });
+  }
+  const range=runMonthRange();
+  $("rankings").innerHTML=page.map(r=>`<tr>
     <td class="dim">${r.dropped ? "drop" : esc(r.rank)}</td>
-    <td><span class="solv ${solvClass(r.solvable)}" title="${esc(solvTitle(r))}"></span>${esc(r.label)}${warningHtml(r.filter_reasons)}${scoreBreakdownHtml(r)}${sourcesHtml(byCluster[r.cluster_id])}</td>
+    <td><span class="solv ${solvClass(r.solvable)}" title="${esc(solvTitle(r))}"></span>${esc(r.label)}${warningHtml(r.filter_reasons)}
+      <div class="sig">${glyphHtml(r)}${sparkHtml(RANK_BY_CLUSTER[r.cluster_id], range)}${trustHtml(r, RANK_BY_CLUSTER[r.cluster_id], range)}</div>
+      ${scoreBreakdownHtml(r)}${sourcesHtml(RANK_BY_CLUSTER[r.cluster_id])}</td>
     <td class="big">${n(r.rank_score)}</td><td>${n(r.demand_score)}</td>
     <td>${n(r.recurrence_score)}</td><td>${n(r.persistence_score)}</td><td>${n(r.saturation_score)}</td>
     <td class="big">${esc(r.distinct_authors)}</td></tr>`).join("");
@@ -793,61 +1048,144 @@ async function loadIdeas(job, runState=null){
   </div>`).join("");
 }
 
-let PAINS=[];
+/* Pains are paged on the server now. PAINS holds one page, never the whole run:
+   pbfamily0001 returns 74,849 pains, which was 41 MB of JSON parsed before the first row
+   appeared. PAIN_MATCHED/PAIN_TOTAL come from the same call, so "N of M" stays honest
+   without the browser owning the rows it is counting. */
+let PAINS=[], PAIN_JOB=null, PAIN_MATCHED=0, PAIN_TOTAL=0;
+let PAIN_OFFSET=0, PAIN_SIZE=20;
+let PAIN_SEQ=0;                        // drops the reply of a filter the user moved past
 function setPainFilters(on){
   document.querySelectorAll("#painsCard .actions, #painSlicers")
     .forEach(el=>el.classList.toggle("filters-off", !on));
 }
+function painQuery(){
+  const p=new URLSearchParams();
+  const q=$("pSearch").value.trim();
+  if(q) p.set("q", q);
+  if($("pPersona").value) p.set("persona", $("pPersona").value);
+  if($("pTheme").value) p.set("theme", $("pTheme").value);
+  if(SLICERS.type.size) p.set("types", [...SLICERS.type].join(","));
+  if(SLICERS.solv.size) p.set("solvable", [...SLICERS.solv].join(","));
+  if(SLICERS.clust.size===1) p.set("clustered", [...SLICERS.clust][0]);
+  if(SORTS.pain.key){ p.set("sort", SORTS.pain.key); p.set("dir", SORTS.pain.dir); }
+  return p;
+}
+async function fetchPains(job, offset){
+  const p=painQuery();
+  p.set("limit", PAIN_SIZE); p.set("offset", Math.max(0, offset));
+  const seq=++PAIN_SEQ;
+  const d=await (await fetch(`/api/run/${job}/pains?${p}`)).json();
+  if(seq!==PAIN_SEQ) return;           // a newer filter is already in flight
+  PAINS=d.rows; PAIN_OFFSET=d.offset;
+  PAIN_MATCHED=d.matched; PAIN_TOTAL=d.total;
+  renderPains();
+}
+/* Any change to a filter has to send the reader back to page 1. Keeping the offset would
+   land them on an empty page whenever the new filter matches fewer rows. */
+async function reloadPains(){
+  if(PAIN_JOB) await fetchPains(PAIN_JOB, 0);
+}
 async function loadPains(job, runState=null){
-  PAINS=await (await fetch(`/api/run/${job}/pains?limit=0`)).json();
-  setPainFilters(PAINS.length>0);   // gray out filters/slicers until there are pains
+  PAIN_JOB=job;
+  const facets=await (await fetch(`/api/run/${job}/pain-facets`)).json();
+  await fetchPains(job, 0);
+  setPainFilters(PAIN_TOTAL>0);   // gray out filters/slicers until there are pains
   $("painsCard").style.display="block";
-  if(!PAINS.length){
+  if(!PAIN_TOTAL){
     $("painsCount").textContent = "";
     $("pains").innerHTML = `<tr><td colspan="5" class="dim">${esc(runOutcomeMsg(runState || {}) || "No pains were extracted for this run.")}</td></tr>`;
     return;
   }
-  const personas=[...new Set(PAINS.map(p=>p.persona_canonical||p.persona).filter(Boolean))].sort();
-  const themes=[...new Set(PAINS.map(p=>p.theme).filter(Boolean))].sort();
   const pv=$("pPersona").value, tv=$("pTheme").value;
-  $("pPersona").innerHTML=`<option value="">all personas</option>`+personas.map(x=>`<option${x===pv?" selected":""}>${esc(x)}</option>`).join("");
-  $("pTheme").innerHTML=`<option value="">all themes</option>`+themes.map(x=>`<option${x===tv?" selected":""}>${esc(x)}</option>`).join("");
-  renderPains();
+  // The picker holds the commonest few hundred. Say so, rather than let a missing entry
+  // read as "this run has no such persona" -- search still covers every row.
+  const head=(list,total,noun)=>`<option value="">all ${noun}${
+    total>list.length ? ` (${total.toLocaleString()}; picker shows top ${list.length})` : ""}</option>`;
+  const ps=facets.personas||[], ts=facets.themes||[];
+  $("pPersona").innerHTML=head(ps,facets.persona_total||ps.length,"personas")
+    +ps.map(x=>`<option${x===pv?" selected":""}>${esc(x)}</option>`).join("");
+  $("pTheme").innerHTML=head(ts,facets.theme_total||ts.length,"themes")
+    +ts.map(x=>`<option${x===tv?" selected":""}>${esc(x)}</option>`).join("");
 }
 const SLICERS={type:new Set(),solv:new Set(),clust:new Set()};
-function painMatchesSlicers(p){
-  if(SLICERS.type.size && ![...SLICERS.type].some(t=>(p[t]||"").trim())) return false;
-  if(SLICERS.solv.size && !SLICERS.solv.has(p.solvable||"_none")) return false;
-  if(SLICERS.clust.size && !SLICERS.clust.has(p.theme?"themed":"unclustered")) return false;
-  return true;
-}
 function toggleChip(el){
   const s=SLICERS[el.dataset.dim];
   if(s.has(el.dataset.val)) s.delete(el.dataset.val); else s.add(el.dataset.val);
   el.classList.toggle("on", s.has(el.dataset.val));
-  renderPains();
+  reloadPains();
 }
 function clearPainFilters(){
   $("pSearch").value=""; $("pPersona").value=""; $("pTheme").value="";
   Object.values(SLICERS).forEach(s=>s.clear());
   document.querySelectorAll("#painSlicers .chip").forEach(c=>c.classList.remove("on"));
-  renderPains();
+  document.querySelectorAll("#wordBars .wbar.on").forEach(b=>b.classList.remove("on"));
+  reloadPains();
 }
-function renderPains(){
-  const q=$("pSearch").value.trim().toLowerCase();
-  const per=$("pPersona").value, th=$("pTheme").value;
-  const rows=PAINS.filter(p=>{
-    if(per && (p.persona_canonical||p.persona)!==per) return false;
-    if(th && p.theme!==th) return false;
-    if(!painMatchesSlicers(p)) return false;
-    if(q){
-      const hay=`${p.complaint||""} ${p.wish||""} ${p.workflow_pain||""} ${p.workaround||""} ${p.span||""} ${p.persona||""} ${p.persona_canonical||""} ${p.theme||""}`.toLowerCase();
-      if(!hay.includes(q)) return false;
-    }
-    return true;
+/* ---- Column sorting -------------------------------------------------------
+   One handler for every table. A header carries data-sort="<key>"; its row carries
+   data-sortgroup="<name>". Clicking the active column flips the direction, clicking
+   another switches to it. SORTS holds {key, dir} per group. */
+const SORTS={runs:{key:"updated_at",dir:"desc"}, rank:{key:"rank",dir:"asc"},
+             pain:{key:"",dir:"asc"}};
+const SORT_APPLY={runs:()=>{ RUN_OFFSET=0; loadRuns(); },
+                  rank:()=>{ RANK_OFFSET=0; renderRankings(); },
+                  pain:()=>reloadPains()};
+function paintSortHeaders(group){
+  const s=SORTS[group];
+  document.querySelectorAll(`tr[data-sortgroup="${group}"] th[data-sort]`).forEach(th=>{
+    const on = th.dataset.sort===s.key;
+    th.classList.toggle("sorted", on);
+    let c=th.querySelector(".caret");
+    if(!c){ c=document.createElement("span"); c.className="caret"; th.appendChild(c); }
+    c.textContent = on ? (s.dir==="asc" ? "▲" : "▼") : "▲";
+    th.title = `Sort by ${th.textContent.replace(/[▲▼]/g,"").trim()}`;
   });
-  $("painsCount").textContent=`— ${rows.length} of ${PAINS.length}`;
-  $("pains").innerHTML=rows.length ? rows.map(p=>{
+}
+document.addEventListener("click", e => {
+  const th=e.target.closest?.("th[data-sort]");
+  if(!th) return;
+  const group=th.closest("tr").dataset.sortgroup, s=SORTS[group];
+  if(!s) return;
+  // Second click on the same column reverses it; a new column starts ascending.
+  if(s.key===th.dataset.sort) s.dir = s.dir==="asc" ? "desc" : "asc";
+  else { s.key=th.dataset.sort; s.dir="asc"; }
+  paintSortHeaders(group);
+  SORT_APPLY[group]();
+});
+/* Mixed types in one column sort badly with a bare `<`: a null jumps to the top and a
+   number compares as a string. Nulls last, numbers numerically, text case-insensitively. */
+function cmpBy(key, dir){
+  const sign = dir==="desc" ? -1 : 1;
+  return (a,b)=>{
+    const x=a[key], y=b[key];
+    const xn=(x===null||x===undefined||x===""), yn=(y===null||y===undefined||y==="");
+    if(xn && yn) return 0;
+    if(xn) return 1;                 // empties sink, whichever way the column is sorted
+    if(yn) return -1;
+    if(typeof x==="number" && typeof y==="number") return (x-y)*sign;
+    return String(x).localeCompare(String(y), undefined, {numeric:true, sensitivity:"base"})*sign;
+  };
+}
+
+/* One pager for both tables. Twenty rows is a screenful: the old "show 300 more" button
+   grew the page until the reader lost their place, and a run with 74,849 pains or 8,925
+   ranked themes has no bottom worth scrolling to. */
+function setPager(id, offset, size, total){
+  const from = total ? offset+1 : 0, to = Math.min(offset+size, total);
+  $(id+"PageInfo").textContent = total
+    ? `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`
+    : "nothing to show";
+  $(id+"Prev").disabled = offset <= 0;
+  $(id+"Next").disabled = offset + size >= total;
+}
+
+function renderPains(){
+  const rows=PAINS;
+  $("painsCount").textContent=`— ${PAIN_MATCHED.toLocaleString()} of ${PAIN_TOTAL.toLocaleString()}`;
+  setPager("pain", PAIN_OFFSET, PAIN_SIZE, PAIN_MATCHED);
+  const view = rows;
+  $("pains").innerHTML=(rows.length ? view.map(p=>{
     const msg=p.complaint||p.wish||p.workflow_pain||p.workaround||"";
     const span=p.span||"", source=p.source||"";
     const seg=p.persona_canonical||p.persona||"-";
@@ -857,7 +1195,378 @@ function renderPains(){
       <td>${esc(msg)}</td>
       <td class="quote">"${esc(span)}"</td>
       <td>${source ? `<a href="${esc(source)}" target="_blank" rel="noopener">Open source</a>` : '<span class="dim">n/a</span>'}</td></tr>`;
-  }).join("") : `<tr><td colspan="5" class="dim">no pains match filter</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="dim">no pains match filter</td></tr>`);
+}
+
+/* ---------------------------------------------------------------------------
+   Signal charts. Hand-rolled SVG, because the app ships no CDN dependency and
+   these are three small forms: a scatter, an area and a bar row.
+   --------------------------------------------------------------------------- */
+const VIZ_W=760;                       // viewBox width; the SVG scales to the card
+let VIZ=null, VIZ_JOB=null;
+
+/* The top tick must be >= max. Stopping at the last tick BELOW max made the caller's
+   scale top 7,500 for a 9,282 peak, and the peak plotted at y = -5, above the chart. */
+function niceTicks(max, count=5){
+  if(max<=0) return [0];
+  const raw=max/count, mag=Math.pow(10, Math.floor(Math.log10(raw)));
+  const step=[1,2,2.5,5,10].find(m=>m*mag>=raw)*mag;
+  const out=[];
+  for(let v=0; ; v+=step){ out.push(Math.round(v*1e6)/1e6); if(v>=max-step*1e-9) break; }
+  return out;
+}
+/* Ticks for an axis that does NOT start at zero. Stepping from 0 and then discarding the
+   ticks below the domain left the theme map with two gridlines. */
+function niceTicksRange(lo, hi, count=5){
+  const span=hi-lo;
+  if(!(span>0)) return [lo];
+  const raw=span/count, mag=Math.pow(10, Math.floor(Math.log10(raw)));
+  const step=[1,2,2.5,5,10].find(m=>m*mag>=raw)*mag;
+  const out=[];
+  for(let v=Math.ceil(lo/step)*step; v<=hi+step*0.001; v+=step) out.push(Math.round(v*1e6)/1e6);
+  return out;
+}
+function vizTipHtml(title, pairs){
+  return `<b>${esc(title)}</b>`+pairs.map(([k,v])=>`<span class="k">${esc(k)}</span> ${esc(String(v))}`).join("<br>");
+}
+
+async function loadViz(job){
+  VIZ_JOB=job;
+  VIZ=await (await fetch(`/api/run/${job}/viz`)).json();
+  const any=(VIZ.themes.themes.length || VIZ.timeline.length || VIZ.personas.length
+             || (VIZ.ideas||[]).length);
+  $("vizCard").style.display = any ? "block" : "none";
+  if(!any) return;
+  drawThemeMap();
+  drawSentiment();
+  drawIdeas();
+  drawTimeline();
+  drawPersonas();
+  // The table's sparklines share the run's month axis, which only the timeline knows.
+  if(RANK_JOB===job && RANKINGS.length) renderRankings();
+}
+
+/* 1. Opportunity quadrant. Two measures the reader has to weigh together -- do people
+   say they would pay, and how hard does the pain bite -- so a scatter, not two bar charts.
+   The blended demand score hid this: a theme can score 6 on frequency alone.
+
+   Split at 5 on both 0-10 scales, not at the data's median: on run pbfamily0001, 256 of
+   the 400 plotted themes sit on the WTP floor of 1.0, so a median split would put the
+   line on the floor and call everything else a painkiller.
+
+   Binned, not one dot per theme. Both measures are coarse (intensity takes six values),
+   so a plain scatter drew 400 circles on 56 spots and read as an empty chart. One mark per
+   occupied cell, area = themes stacked there, colour = the software-fit verdict most of
+   them carry, using the same three colours as the table's dot. Named marks are the
+   top-ranked themes, so the reader can find the table row from the chart. */
+const SOLV_FILL={yes:"var(--ok)", partial:"var(--acc)", no:"var(--viz-mut)", unknown:"var(--viz-axis)"};
+function drawThemeMap(){
+  const d=VIZ.themes, rows=d.themes;
+  if(!rows.length){ $("vizThemes").innerHTML=""; return; }
+  const H=360, m={t:18,r:22,b:40,l:52}, pw=VIZ_W-m.l-m.r, ph=H-m.t-m.b;
+  const SPLIT=5;
+  // Fit the axes to the data, but always keep the split line inside the plot. The low
+  // side gets more room: most themes sit on the WTP floor and the lowest intensity step,
+  // and those marks must clear the axis and the corner names.
+  const xs=rows.map(r=>r.wtp||0), ys=rows.map(r=>r.intensity||0);
+  const x0=Math.min(...xs, SPLIT-0.5)-0.9, x1=Math.max(...xs, SPLIT+0.5)+0.6;
+  const y0=Math.min(...ys, SPLIT-0.5)-0.9, y1=Math.max(...ys, SPLIT+0.5)+0.6;
+  const sx=v=>m.l + (v-x0)/(x1-x0)*pw;
+  const sy=v=>m.t + ph - (v-y0)/(y1-y0)*ph;
+
+  const cellKey=r=>(Math.round((r.wtp||0)*10)/10)+"|"+(Math.round((r.intensity||0)*10)/10);
+  const cells=new Map();
+  rows.forEach(r=>{
+    const key=cellKey(r);
+    let c=cells.get(key);
+    if(!c){ c={wtp:Math.round((r.wtp||0)*10)/10, intensity:Math.round((r.intensity||0)*10)/10,
+             items:[], asum:0, solv:{yes:0,partial:0,no:0,unknown:0}}; cells.set(key,c); }
+    c.items.push(r); c.asum+=r.authors||0; c.solv[solvClass(r.solvable)]++;
+  });
+  const list=[...cells.values()].sort((a,b)=>b.items.length-a.items.length);
+  const maxN=Math.max(...list.map(c=>c.items.length),1);
+  // Area, not radius, is proportional to the count -- radius would exaggerate a big cell.
+  const rad=n0=>4+11*Math.sqrt(n0/maxN);
+  const majority=s=>Object.entries(s).sort((a,b)=>b[1]-a[1])[0][0];
+
+  const svg=[`<svg viewBox="0 0 ${VIZ_W} ${H}" role="img" aria-label="Themes by willingness to pay and pain intensity">`];
+  // Quadrant shading: the prize corner only, so the eye goes there first.
+  svg.push(`<rect class="prize" x="${sx(SPLIT).toFixed(1)}" y="${m.t}" width="${(sx(x1)-sx(SPLIT)).toFixed(1)}" height="${(sy(SPLIT)-m.t).toFixed(1)}"/>`);
+  niceTicksRange(y0,y1,5).forEach(v=>{ const y=sy(v);
+    svg.push(`<line class="gridline" x1="${m.l}" y1="${y}" x2="${VIZ_W-m.r}" y2="${y}"/>`);
+    svg.push(`<text x="${m.l-8}" y="${y+4}" text-anchor="end">${v.toLocaleString(undefined,{maximumFractionDigits:1})}</text>`); });
+  niceTicksRange(x0,x1,6).forEach(v=>svg.push(`<text x="${sx(v).toFixed(1)}" y="${m.t+ph+16}" text-anchor="middle">${v.toLocaleString(undefined,{maximumFractionDigits:1})}</text>`));
+  svg.push(`<line class="axisline" x1="${m.l}" y1="${m.t+ph}" x2="${VIZ_W-m.r}" y2="${m.t+ph}"/>`);
+  svg.push(`<line class="split" x1="${sx(SPLIT).toFixed(1)}" y1="${m.t}" x2="${sx(SPLIT).toFixed(1)}" y2="${m.t+ph}"/>`);
+  svg.push(`<line class="split" x1="${m.l}" y1="${sy(SPLIT).toFixed(1)}" x2="${VIZ_W-m.r}" y2="${sy(SPLIT).toFixed(1)}"/>`);
+  svg.push(`<text x="${m.l+pw/2}" y="${H-4}" text-anchor="middle">willingness to pay (0-10)</text>`);
+  svg.push(`<text x="${m.l-38}" y="${m.t+ph/2}" text-anchor="middle" transform="rotate(-90 ${m.l-38} ${m.t+ph/2})">pain intensity (0-10)</text>`);
+  // Corner names. Placed inside the plot, against the edges, so they never collide with ticks.
+  const corner=(x,y,anchor,txt)=>svg.push(`<text class="corner" x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}">${txt}</text>`);
+  corner(VIZ_W-m.r-6, m.t+12, "end", "PAINKILLER");
+  corner(m.l+6, m.t+12, "start", "NICHE, DESPERATE");
+  corner(VIZ_W-m.r-6, m.t+ph-6, "end", "NICE-TO-HAVE");
+  corner(m.l+6, m.t+ph-6, "start", "VITAMIN");
+
+  // Biggest first, so a crowded cell never hides the single-theme outlier beside it.
+  list.forEach(c=>{
+    const best=c.items.reduce((a,b)=>(b.rank||1e9)<(a.rank||1e9)?b:a);
+    const names=c.items.slice(0,3).map(t=>t.label||"(no label)");
+    const verdict=majority(c.solv);
+    const tip=vizTipHtml(c.items.length===1 ? names[0] : `${c.items.length} themes here`, [
+      ["WTP", n(c.wtp)], ["intensity", n(c.intensity)],
+      ["authors", `${c.asum.toLocaleString()} in total`],
+      ["software fit", `${c.solv.yes} yes · ${c.solv.partial} partial · ${c.solv.no} no`],
+      ...(c.items.length>1 ? [["", names.join(" · ")+(c.items.length>3?` … +${c.items.length-3}`:"")]] : []),
+      ["click", "open " + (best.label||"(no label)")]]);
+    svg.push(`<circle class="dot" cx="${sx(c.wtp).toFixed(1)}" cy="${sy(c.intensity).toFixed(1)}"
+      r="${rad(c.items.length).toFixed(1)}" fill="${SOLV_FILL[verdict]}"
+      data-theme="${esc(best.label||"")}" data-tip="${esc(tip)}"/>`);
+  });
+  // Rank numbers as callouts, not full names: the floor row holds most themes, and a name
+  // drawn there ran across five other marks. The key under the chart carries the names.
+  // Themes on the same spot share one callout ("1·2").
+  const named=rows.filter(r=>r.rank!=null).sort((a,b)=>a.rank-b.rank).slice(0,10);
+  const byCell=new Map();
+  named.forEach(r=>{ const k=cellKey(r); if(!byCell.has(k)) byCell.set(k,[]); byCell.get(k).push(r); });
+  byCell.forEach((list,key)=>{
+    const c=cells.get(key), r0=rad(c.items.length);
+    const cx=sx(c.wtp), cy=sy(c.intensity);
+    const tip=vizTipHtml(list.map(r=>`${r.rank}. ${r.label}`).join(" · "), [["click", "open " + list[0].label]]);
+    svg.push(`<text class="callout" x="${(cx+r0+2).toFixed(1)}" y="${(cy-r0*0.5).toFixed(1)}" data-theme="${esc(list[0].label||"")}" data-tip="${esc(tip)}">${list.map(r=>r.rank).join("·")}</text>`);
+  });
+  svg.push(`</svg>`);
+  const key=named.length ? `<ol class="names">${named.map(r=>
+    `<li data-theme="${esc(r.label||"")}"><b>${r.rank}</b>${esc(r.label||"")} <span class="k">· ${(r.authors||0).toLocaleString()} authors</span></li>`).join("")}</ol>` : "";
+  const hidden=d.total-rows.length;
+  $("vizThemes").innerHTML=`<h4>Opportunity quadrant</h4>
+    <p class="sub">Top right is the prize: people say they would pay, and the pain bites hard.
+      Split at 5 on both 0-10 scales. A bigger circle means more themes sit on that exact spot;
+      the colour is the software-fit verdict most of them carry. The numbers mark the top-ranked themes, named below.
+      ${hidden>0 ? `Plotting ${rows.length.toLocaleString()} of ${d.total.toLocaleString()} themes: every ranked theme, plus the best-supported of the rest. The other ${hidden.toLocaleString()} have too few authors to place.` : ""}
+      Click a circle, a number or a name to open its pains.</p>
+    ${svg.join("")}
+    <div class="vizkey"><span>software fit</span>
+      <i style="background:var(--ok)"></i><span>yes</span>
+      <i style="background:var(--acc)"></i><span>partial</span>
+      <i style="background:var(--viz-mut)"></i><span>no</span>
+      <i style="background:var(--viz-axis)"></i><span>unclassified</span>
+    </div>
+    ${key}`;
+}
+
+/* 1b. Sentiment. NOT happy/sad: the five stances are ordered by how ready the writers are
+   to act, from "resigned" (gave up, hard to sell to) to "seeking" (asking for a tool right
+   now). Ordered categories, so one hue stepped light to dark, never five different hues.
+
+   One stacked bar and not five separate bars, because the question is "what share of the
+   demand is warm", and a share is what a stack shows. */
+const STANCES=[
+  {key:"resigned", label:"Resigned",  hint:"gave up; hard to sell to",        step:"--viz-s1"},
+  {key:"neutral",  label:"Neutral",   hint:"stating a fact, no heat",         step:"--viz-s2"},
+  {key:"anxious",  label:"Anxious",   hint:"afraid; will pay for certainty",  step:"--viz-s3"},
+  {key:"angry",    label:"Angry",     hint:"loud; will switch",               step:"--viz-s4"},
+  {key:"seeking",  label:"Seeking",   hint:"asking for a tool NOW",           step:"--viz-s5"},
+];
+function drawSentiment(){
+  const d=(VIZ.sentiment||{}), sum=d.summary||[], byKey={};
+  sum.forEach(s=>{ byKey[s.stance]=s; });
+  const rated=sum.reduce((a,s)=>a+s.themes,0);
+  if(!rated){
+    // Say how to fill it, rather than leaving a blank panel that reads as a broken chart.
+    const nThemes=(VIZ.themes||{}).total||0;
+    $("vizSentiment").innerHTML=`<h4>Sentiment &mdash; how ready they are to act</h4>
+      <p class="sub">No theme has been rated yet. This is a separate backfill, not part of
+      the pipeline run: roughly ${Math.max(1,Math.round(nThemes/4000))} hour${nThemes>6000?"s":""}
+      of local model time for ${nThemes.toLocaleString()} themes. It is resumable, so it
+      is safe to stop.<br><code>python -m pipeline.s7c_sentiment ${esc(VIZ_JOB||"&lt;run_id&gt;")}</code></p>`;
+    return;
+  }
+  const m={t:26,r:16,b:8,l:16}, bh=34, GAP=2;
+  const H=m.t+bh+m.b, pw=VIZ_W-m.l-m.r;
+  const total=STANCES.reduce((a,s)=>a+((byKey[s.key]||{}).authors||0),0) || 1;
+  const svg=[`<svg viewBox="0 0 ${VIZ_W} ${H}" role="img" aria-label="Share of authors by emotional stance">`];
+  let x=m.l;
+  STANCES.forEach(st=>{
+    const row=byKey[st.key]; if(!row || !row.authors) return;
+    const w=Math.max(2, row.authors/total*(pw-GAP*4));
+    const pct=row.authors/total*100;
+    const tip=vizTipHtml(st.label+" — "+st.hint, [
+      ["authors", row.authors.toLocaleString()+` (${pct.toFixed(1)}%)`],
+      ["themes", row.themes.toLocaleString()],
+      ["mean urgency", n(row.urgency)],
+      ...( (d.examples||{})[st.key]||[] ).slice(0,3).map(e=>["", `${e.label} · ${e.authors} authors`])]);
+    // Label inside only when it measurably fits; ~7px per character at 11px system sans.
+    const txt=`${st.label} ${pct.toFixed(0)}%`;
+    const fits=w > txt.length*6.6 + 16;
+    svg.push(`<rect class="stack" x="${x.toFixed(1)}" y="${m.t}" width="${w.toFixed(1)}" height="${bh}"
+      rx="3" fill="var(${st.step})" data-stance="${st.key}" data-tip="${esc(tip)}"/>`);
+    if(fits) svg.push(`<text x="${(x+w/2).toFixed(1)}" y="${m.t+bh/2+4}" text-anchor="middle"
+      style="fill:${st.key==="seeking"||st.key==="angry" ? "#0b0b0b" : "#ffffff"}">${esc(txt)}</text>`);
+    x += w + GAP;
+  });
+  svg.push(`<text x="${m.l}" y="${m.t-9}">share of complaining authors, coldest lead to warmest</text>`);
+  svg.push(`</svg>`);
+  const unrated=(byKey.unrated||{}).themes||0;
+  $("vizSentiment").innerHTML=`<h4>Sentiment &mdash; how ready they are to act</h4>
+    <p class="sub">Not happy against sad. Each stance says how likely the people in a theme
+      are to buy a fix. Widths are <b>distinct authors</b>, so one theme 493 people are
+      angry about outweighs 400 themes with one author each.
+      ${unrated ? ` ${unrated.toLocaleString()} themes came back unrated.` : ""}</p>
+    ${svg.join("")}
+    <div class="vizkey">${STANCES.filter(s=>byKey[s.key]).map(s=>
+      `<i style="background:var(${s.step})"></i><span title="${esc(s.hint)}">${s.label}</span>`).join("")}</div>`;
+}
+
+/* 1c. Idea strength. The ideas card lists a title and a pitch, which makes a one-author
+   throwaway look identical to the theme 493 people complained about. This is the same list
+   with its evidence attached. */
+function drawIdeas(){
+  const rows=(VIZ.ideas||[]).filter(r=>r.title);
+  if(!rows.length){ $("vizIdeas").innerHTML=""; return; }
+  const scored=rows.map(r=>({...r, score: r.rank_score!=null ? r.rank_score : r.demand}));
+  const bh=20, gap=8, m={t:22,r:96,b:8,l:236};
+  const H=m.t+m.b+scored.length*(bh+gap)-gap, pw=VIZ_W-m.l-m.r;
+  const maxS=Math.max(...scored.map(r=>r.score||0),1);
+  const ranked=scored.some(r=>r.rank_score!=null);
+  const svg=[`<svg viewBox="0 0 ${VIZ_W} ${H}" role="img" aria-label="Ideas by the strength of their theme">`];
+  svg.push(`<text x="${m.l}" y="${m.t-9}">${ranked ? "rank score of the idea&rsquo;s theme" : "demand score of the idea&rsquo;s theme (not ranked yet)"}</text>`);
+  scored.forEach((r,i)=>{
+    const y=m.t+i*(bh+gap), w=Math.max(2, (r.score||0)/maxS*pw), r4=Math.min(4,w);
+    const tip=vizTipHtml(r.title, [
+      ["theme", r.theme||"(none)"], ["authors", (r.authors||0).toLocaleString()],
+      ["demand", n(r.demand)], ...(r.rank_score!=null ? [["rank score", n(r.rank_score)]] : []),
+      ...(r.stance ? [["stance", r.stance]] : []),
+      ["click", "open the pains behind it"]]);
+    svg.push(`<text x="${m.l-10}" y="${y+bh/2+4}" text-anchor="end">${esc(r.title.length>40 ? r.title.slice(0,39)+"…" : r.title)}</text>`);
+    svg.push(`<path class="bar" d="M${m.l},${y} H${m.l+w-r4} a4,4 0 0 1 4,4 V${y+bh-4} a4,4 0 0 1 -4,4 H${m.l} Z"
+      data-theme="${esc(r.theme||"")}" data-tip="${esc(tip)}"/>`);
+    svg.push(`<text class="barval" x="${m.l+w+8}" y="${y+bh/2+4}">${n(r.score)} · ${(r.authors||0).toLocaleString()} auth</text>`);
+  });
+  svg.push(`</svg>`);
+  $("vizIdeas").innerHTML=`<h4>Idea strength</h4>
+    <p class="sub">Every generated idea against the evidence its own theme carries. A short
+      bar is an idea built on one person&rsquo;s complaint. Click a bar to read those pains.</p>
+    ${svg.join("")}`;
+}
+
+/* 2. Pains per month. One series, so no legend -- the heading says what is plotted. */
+function drawTimeline(){
+  // The current month is only part-collected, so plotting it draws a cliff and makes a
+  // live topic look dead. Drop it and say so.
+  const nowYm=new Date().toISOString().slice(0,7);
+  const all=VIZ.timeline, partial=all.length && all[all.length-1].month===nowYm;
+  const rows=partial ? all.slice(0,-1) : all;
+  if(rows.length<2){ $("vizTime").innerHTML=""; return; }
+  const H=232, m={t:34,r:16,b:34,l:48}, pw=VIZ_W-m.l-m.r, ph=H-m.t-m.b;
+  const maxP=Math.max(...rows.map(r=>r.pains),1);
+  const yt=niceTicks(maxP,4);
+  const top=yt[yt.length-1];
+  const sx=i=>m.l + (rows.length===1?pw/2:i/(rows.length-1)*pw);
+  const sy=v=>m.t + ph - (v/top)*ph;
+  const pts=rows.map((r,i)=>`${sx(i).toFixed(1)},${sy(r.pains).toFixed(1)}`).join(" ");
+  const svg=[`<svg viewBox="0 0 ${VIZ_W} ${H}" role="img" aria-label="Pains per month">`];
+  yt.forEach(v=>{ const y=sy(v);
+    svg.push(`<line class="gridline" x1="${m.l}" y1="${y}" x2="${VIZ_W-m.r}" y2="${y}"/>`);
+    svg.push(`<text x="${m.l-8}" y="${y+4}" text-anchor="end">${v.toLocaleString()}</text>`); });
+  svg.push(`<polygon class="area" points="${m.l},${m.t+ph} ${pts} ${sx(rows.length-1).toFixed(1)},${m.t+ph}"/>`);
+  svg.push(`<polyline class="line" points="${pts}"/>`);
+  svg.push(`<line class="axisline" x1="${m.l}" y1="${m.t+ph}" x2="${VIZ_W-m.r}" y2="${m.t+ph}"/>`);
+  // Label the peak only. A number on all 49 months would be unreadable.
+  const pi=rows.reduce((b,r,i)=>r.pains>rows[b].pains?i:b,0);
+  const py=sy(rows[pi].pains);
+  svg.push(`<circle class="peak" cx="${sx(pi).toFixed(1)}" cy="${py.toFixed(1)}" r="4"/>`);
+  // The peak is the top of the plot by definition, so the label always goes ABOVE it, and
+  // the top margin is sized to hold it. Putting it below drops it onto the line.
+  const anchor=pi<3 ? "start" : (pi>rows.length-4 ? "end" : "middle");
+  svg.push(`<text x="${sx(pi).toFixed(1)}" y="${(py-11).toFixed(1)}" text-anchor="${anchor}" style="fill:var(--fg)">${rows[pi].pains.toLocaleString()} · ${esc(rows[pi].month)}</text>`);
+  // Ticks every 6 months, plus the last, so labels never collide.
+  rows.forEach((r,i)=>{ if(i%6 && i!==rows.length-1) return;
+    svg.push(`<text x="${sx(i).toFixed(1)}" y="${m.t+ph+16}" text-anchor="middle">${esc(r.month)}</text>`); });
+  // One invisible hit band per month: a 2px line is far too thin to hover.
+  const bw=pw/Math.max(1,rows.length-1);
+  rows.forEach((r,i)=>svg.push(`<rect x="${(sx(i)-bw/2).toFixed(1)}" y="${m.t}" width="${bw.toFixed(1)}" height="${ph}"
+    fill="transparent" data-tip="${esc(vizTipHtml(r.month,[["pains",r.pains.toLocaleString()]]))}"/>`));
+  svg.push(`</svg>`);
+  $("vizTime").innerHTML=`<h4>Pains per month</h4>
+    <p class="sub">Dated by when the post was written, not when it was collected, so a
+      backfill does not read as one spike. A rising tail means the pain is still live.
+      ${partial ? `The part-finished month ${esc(nowYm)} is left off.` : ""}</p>
+    ${svg.join("")}`;
+}
+
+/* 3. Who is complaining. One measure per row, so bars off a shared baseline. */
+function drawPersonas(){
+  const rows=VIZ.personas;
+  if(!rows.length){ $("vizPersonas").innerHTML=""; return; }
+  const bh=22, gap=8, m={t:6,r:70,b:26,l:170};
+  const H=m.t+m.b+rows.length*(bh+gap)-gap, pw=VIZ_W-m.l-m.r;
+  const maxP=Math.max(...rows.map(r=>r.pains),1);
+  const svg=[`<svg viewBox="0 0 ${VIZ_W} ${H}" role="img" aria-label="Pains per persona">`];
+  rows.forEach((r,i)=>{
+    const y=m.t+i*(bh+gap), w=Math.max(2, r.pains/maxP*pw);
+    const tip=vizTipHtml(r.persona,[["pains",r.pains.toLocaleString()],["distinct authors",r.authors.toLocaleString()]]);
+    svg.push(`<text x="${m.l-10}" y="${y+bh/2+4}" text-anchor="end">${esc(r.persona.length>30 ? r.persona.slice(0,29)+"…" : r.persona)}</text>`);
+    // 4px rounded data-end, square at the baseline: rx on a <rect> would round all four
+    // corners, so the bar is a path.
+    const x=m.l, r4=Math.min(4,w);
+    svg.push(`<path class="bar" d="M${x},${y} H${x+w-r4} a4,4 0 0 1 4,4 V${y+bh-4} a4,4 0 0 1 -4,4 H${x} Z"
+      data-persona="${esc(r.persona)}" data-tip="${esc(tip)}"/>`);
+    svg.push(`<text class="barval" x="${x+w+8}" y="${y+bh/2+4}">${r.pains.toLocaleString()}</text>`);
+  });
+  svg.push(`</svg>`);
+  $("vizPersonas").innerHTML=`<h4>Top personas by pains</h4>
+    <p class="sub">Who the extractor thinks is speaking. Click a bar to read that
+      persona&rsquo;s pains.</p>${svg.join("")}`;
+}
+
+/* One shared tooltip, driven by data-tip. Marks are small; a per-mark listener on every
+   one of 400 dots would be 400 listeners. */
+const vizTip=document.createElement("div"); vizTip.id="vizTip"; document.body.appendChild(vizTip);
+document.addEventListener("mousemove", e => {
+  const el=e.target.closest?.("[data-tip]");
+  if(!el){ vizTip.style.display="none"; return; }
+  vizTip.innerHTML=el.dataset.tip;
+  vizTip.style.display="block";
+  const r=vizTip.getBoundingClientRect();
+  vizTip.style.left=Math.min(window.innerWidth-r.width-8, e.clientX+14)+"px";
+  vizTip.style.top=Math.max(8, e.clientY-r.height-12)+"px";
+});
+$("vizCard").addEventListener("click", e => {
+  const dot=e.target.closest?.("[data-theme]"), bar=e.target.closest?.("[data-persona]");
+  if(dot){ $("pTheme").value=dot.dataset.theme; if($("pTheme").value!==dot.dataset.theme){
+    // The theme is outside the top-300 picker, so filter by text instead of by value.
+    $("pTheme").value=""; $("pSearch").value=dot.dataset.theme; } }
+  else if(bar){ $("pPersona").value=bar.dataset.persona; if($("pPersona").value!==bar.dataset.persona){
+    $("pPersona").value=""; $("pSearch").value=bar.dataset.persona; } }
+  else return;
+  reloadPains();
+  $("painsCard").scrollIntoView({behavior:"smooth", block:"start"});
+});
+
+/* Word ranking. Bars, not a pie or a cloud: the reader is comparing one number across a
+   sorted list, and a common baseline is the only encoding that lets them do that by eye. */
+let WORDS=[], WORD_JOB=null;
+async function loadWords(job){
+  WORD_JOB=job;
+  const d=await (await fetch(`/api/run/${job}/word-ranking?limit=200`)).json();
+  WORDS=d.terms||[];
+  $("wordsCard").style.display = WORDS.length ? "block" : "none";
+  $("wordsCount").textContent = WORDS.length
+    ? `— from ${(d.total_pains||0).toLocaleString()} pains` : "";
+  renderWords();
+}
+function renderWords(){
+  const gram=$("wGram").value, top=parseInt($("wTop").value,10)||60;
+  const rows=WORDS.filter(w=>!gram || String(w.words)===gram).slice(0, top);
+  if(!rows.length){ $("wordBars").innerHTML=`<p class="dim">no terms</p>`; return; }
+  const max=rows[0].authors || 1;
+  const active=$("pSearch").value.trim().toLowerCase();
+  $("wordBars").innerHTML=rows.map(w=>`<div class="wbar gram${w.words}${w.term===active?" on":""}" data-term="${esc(w.term)}">
+    <span class="wbar-term" title="${esc(w.term)}">${esc(w.term)}</span>
+    <span class="wbar-track"><span class="wbar-fill" style="width:${Math.max(1,Math.round(w.authors/max*100))}%"></span></span>
+    <span class="wbar-num">${w.authors.toLocaleString()} authors<br><span class="dim">${w.pains.toLocaleString()} pains</span></span>
+  </div>`).join("");
 }
 
 async function loadReport(job, runState=null){
@@ -987,11 +1696,38 @@ $("fSeed").addEventListener("input",()=>{
   fSeedDebounce=setTimeout(()=>{ RUN_OFFSET=0; loadRuns(); },300);
 });
 $("fStatus").addEventListener("change",()=>{ RUN_OFFSET=0; loadRuns(); });
-$("pSearch").addEventListener("input",renderPains);
-$("pPersona").addEventListener("change",renderPains);
-$("pTheme").addEventListener("change",renderPains);
+/* Each keystroke is now a round trip, so the debounce is longer than the old in-memory
+   one (150 ms). fetchPains drops a stale reply, so a fast typist cannot end up looking at
+   the results of a prefix they already deleted. */
+let painSearchTimer=null;
+$("pSearch").addEventListener("input",()=>{
+  clearTimeout(painSearchTimer);
+  painSearchTimer=setTimeout(reloadPains,300);
+});
+$("pPersona").addEventListener("change",reloadPains);
+$("pTheme").addEventListener("change",reloadPains);
+$("painPrev").addEventListener("click",()=>fetchPains(PAIN_JOB, PAIN_OFFSET-PAIN_SIZE));
+$("painNext").addEventListener("click",()=>fetchPains(PAIN_JOB, PAIN_OFFSET+PAIN_SIZE));
+$("pSize").addEventListener("change",()=>{ PAIN_SIZE=parseInt($("pSize").value,10)||20; reloadPains(); });
+$("rankPrev").addEventListener("click",()=>{ RANK_OFFSET=Math.max(0,RANK_OFFSET-RANK_SIZE); renderRankings(); });
+$("rankNext").addEventListener("click",()=>{ RANK_OFFSET+=RANK_SIZE; renderRankings(); });
+$("rankSize").addEventListener("change",()=>{ RANK_SIZE=parseInt($("rankSize").value,10)||20; RANK_OFFSET=0; renderRankings(); });
 document.querySelectorAll("#painSlicers .chip").forEach(c=>c.addEventListener("click",()=>toggleChip(c)));
 $("pClear").addEventListener("click",clearPainFilters);
+$("wGram").addEventListener("change",renderWords);
+$("wTop").addEventListener("change",renderWords);
+/* A bar is a filter, not a decoration: clicking one puts the term in the pain search so
+   the evidence behind the number is one click away. */
+$("wordBars").addEventListener("click", e => {
+  const bar=e.target.closest?.(".wbar"); if(!bar) return;
+  const term=bar.dataset.term;
+  const already=$("pSearch").value.trim().toLowerCase()===term.toLowerCase();
+  $("pSearch").value = already ? "" : term;
+  renderWords();
+  reloadPains();
+  if(!already) $("painsCard").scrollIntoView({behavior:"smooth", block:"start"});
+});
+["runs","rank","pain"].forEach(paintSortHeaders);
 syncCorpusMode();
 syncHistoricalToggles();
 </script>

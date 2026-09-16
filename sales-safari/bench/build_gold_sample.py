@@ -78,15 +78,32 @@ BUCKETS = [
     ("200-499", 200, 500),
 ]
 
+# --long extends the sample past the MAX_LEN cap. Round 1 stopped at 500 chars, which is
+# 88.5% of extracted docs but only ~69% of pain docs -- the 500+ tail runs a 28-36% pain
+# rate against 3.4% at the short end. That matters for a reason beyond coverage: the whole
+# gold set produced just 10 pain docs from 112 labels, so every CI is enormous (qwen3.5's
+# recall reads 10% with a 95% interval of [1.8%, 40.4%]). Sampling where pain is dense buys
+# more gold PAIN docs per document a human has to read, which is the actual bottleneck.
+LONG_BUCKETS = [
+    ("500-999", 500, 1000),
+    ("1000+", 1000, 10 ** 9),
+]
+
 # Docs a run actually put through extraction, within the MAX_LEN cap. Deliberately does
 # NOT mention `pains` - the labels must not come from the thing being measured.
-POP = f"""
+def _pop(max_len: int) -> str:
+    """Docs a run actually put through extraction, under `max_len`. Deliberately does NOT
+    mention `pains` - the labels must not come from the thing being measured."""
+    return f"""
   FROM documents d
  WHERE COALESCE(d.raw_markdown,'') <> ''
-   AND LENGTH(d.raw_markdown) < {MAX_LEN}
+   AND LENGTH(d.raw_markdown) < {max_len}
    AND EXISTS (SELECT 1 FROM run_documents rd JOIN runs r ON r.job_id = rd.run_id
                 WHERE rd.document_id = d.id AND r.stage >= 3)
 """
+
+
+POP = _pop(MAX_LEN)
 
 
 def check_buckets():
@@ -110,20 +127,22 @@ def check_buckets():
             raise SystemExit(f"BUCKETS gap/overlap at {hi} -> {lo}")
 
 
-def main(seed: int, per_bucket: int, out: Path):
+def main(seed: int, per_bucket: int, out: Path, long: bool = False):
     check_buckets()
+    buckets = BUCKETS + (LONG_BUCKETS if long else [])
+    pop = _pop(10 ** 9 if long else MAX_LEN)
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
     con = sqlite3.connect(cfg["db_path"])
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
-    total = cur.execute("SELECT COUNT(*) " + POP).fetchone()[0]
+    total = cur.execute("SELECT COUNT(*) " + pop).fetchone()[0]
     rng = random.Random(seed)
 
     docs, strata = [], []
-    for name, lo, hi in BUCKETS:
+    for name, lo, hi in buckets:
         where = f" AND LENGTH(d.raw_markdown) >= {lo} AND LENGTH(d.raw_markdown) < {hi}"
-        pool = [r[0] for r in cur.execute("SELECT d.id " + POP + where).fetchall()]
+        pool = [r[0] for r in cur.execute("SELECT d.id " + pop + where).fetchall()]
         if len(pool) < per_bucket:
             raise SystemExit(f"bucket {name}: only {len(pool)} docs, need {per_bucket}")
         picked = rng.sample(pool, per_bucket)
@@ -191,10 +210,13 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--per-bucket", type=int, default=PER_BUCKET)
     ap.add_argument("--out", type=Path, default=OUT)
+    ap.add_argument("--long", action="store_true",
+                    help="also sample the 500+ char buckets round 1 excluded (28-36%% pain "
+                         "rate vs 3.4%% at the short end -- more gold pain docs per label)")
     ap.add_argument("--emit-html", action="store_true",
                     help="also write bench/label-gold.html with the sample inlined")
     a = ap.parse_args()
-    s = main(a.seed, a.per_bucket, a.out)
+    s = main(a.seed, a.per_bucket, a.out, a.long)
     if a.emit_html:
         p = emit_html(s, TEMPLATE, PAGE)
         print(f"\n  WROTE {p} ({p.stat().st_size/1024:.0f} KB) - open it and start labelling.")

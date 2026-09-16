@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 PROMPT_VERSION = "extract-v3"
@@ -88,8 +89,71 @@ def _claude_binary() -> str:
         + " or ".join(str(d) for d in _CLAUDE_FALLBACK_DIRS))
 
 
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _check_claude_guardrail(guard_cfg: dict = None) -> None:
+    """Enforce hourly call budget and burst pacing for Claude CLI invocations.
+
+    Protects operator token budget by capping Claude calls to <=20% of an hourly plan
+    (default 8 calls per rolling hour) and enforcing a pacing delay.
+    """
+    if guard_cfg is None:
+        cfg_file = _ROOT / "config.yaml"
+        if cfg_file.exists():
+            try:
+                import yaml
+                full_cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+                guard_cfg = full_cfg.get("claude_guardrail") or {}
+            except Exception:
+                guard_cfg = {}
+        else:
+            guard_cfg = {}
+
+    if not guard_cfg.get("enabled", True):
+        return
+
+    max_calls = int(guard_cfg.get("max_calls_per_hour", 8))
+    window_sec = float(guard_cfg.get("budget_window_seconds", 3600.0))
+    min_interval = float(guard_cfg.get("min_call_interval_seconds", 10.0))
+    state_file = _ROOT / str(guard_cfg.get("state_file", "db/claude_usage.json"))
+
+    now = time.time()
+    calls = []
+    if state_file.exists():
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                calls = [float(ts) for ts in data if now - float(ts) < window_sec]
+        except Exception:
+            calls = []
+
+    if len(calls) >= max_calls:
+        oldest_in_window = min(calls)
+        retry_after = int(window_sec - (now - oldest_in_window)) + 1
+        raise RuntimeError(
+            f"hourly budget exceeded: Claude CLI budget capped at 20% hourly limit "
+            f"({len(calls)}/{max_calls} calls in last {int(window_sec//60)}m; resets in {retry_after}s)"
+        )
+
+    if calls:
+        last_call = max(calls)
+        elapsed = now - last_call
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+            now = time.time()
+
+    calls.append(now)
+    try:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps(calls[-max_calls * 2:]), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _call_claude(prompt: str, timeout: int = 180, model: str = "sonnet",
-                 system_prompt: str = None) -> str:
+                 system_prompt: str = None, guardrail_cfg: dict = None) -> str:
+    _check_claude_guardrail(guardrail_cfg)
     # `claude -p` otherwise inherits the coding-agent system prompt, which refuses
     # non-programming lookups ("Can't provide URLs for non-programming requests") - fatal
     # for the competitor/brief stages, which are market research, not coding. Replacing the
@@ -260,7 +324,8 @@ def _call_provider(provider: str, prompt: str, extract_cfg: dict) -> str:
     if provider == "claude":
         return _call_claude(prompt, timeout=extract_cfg.get("claude_timeout", 180),
                             model=extract_cfg.get("claude_model", "sonnet"),
-                            system_prompt=extract_cfg.get("claude_system_prompt"))
+                            system_prompt=extract_cfg.get("claude_system_prompt"),
+                            guardrail_cfg=extract_cfg.get("claude_guardrail"))
     if provider == "codex":
         return _call_codex(prompt, cfg=extract_cfg.get("codex", {}),
                            timeout=extract_cfg.get("codex_timeout", 300))
@@ -280,6 +345,13 @@ def _call_extractor(prompt: str, extract_cfg: dict = None) -> tuple[str, str]:
         "429",
         "monthly usage limit",
         "usage limit",
+        "hourly budget exceeded",
+        "budget limit",
+        "budget capped",
+        "connection error",
+        "connection refused",
+        "timed out",
+        "timeout",
     ]
     errors = []
     for idx, provider in enumerate(providers):
@@ -602,7 +674,8 @@ def keep_types_from_cfg(verify_cfg: dict = None) -> set:
 
 
 def classify_candidates(candidates: list, verify_cfg: dict = None, extract_cfg: dict = None,
-                        progress=None, should_stop=None, require_verdict: bool = False) -> dict:
+                        progress=None, should_stop=None, require_verdict: bool = False,
+                        on_batch=None) -> dict:
     """Store-independent core of stage 3b, reused by verify_run and by bench/score_gold.
 
     `candidates` = list of {id, span, summary, title, context}. Returns
@@ -655,18 +728,24 @@ def classify_candidates(candidates: list, verify_cfg: dict = None, extract_cfg: 
             out[c["id"]] = {"pain_type": ptype, "verified": verified,
                             "reason": _clean_field((v or {}).get("reason"))}
             kept += verified
+        # Checkpoint THIS batch before starting the next one. Holding every verdict until the
+        # end means a job that is interrupted -- and at ~7,300 calls for a full run, one will
+        # be -- writes nothing at all. Measured: 2,200 candidates judged over 80 minutes,
+        # zero rows persisted, because the caller never reached its save loop.
+        if on_batch:
+            on_batch({cid: out[cid] for cid in (c["id"] for c in batch) if cid in out})
         if progress:
             progress(min(i + batch_size, len(candidates)), len(candidates), kept)
     return out
 
 
 def verify_run(store, run_id: str, verify_cfg: dict = None, extract_cfg: dict = None,
-               progress=None, should_stop=None) -> dict:
+               progress=None, should_stop=None, pain_ids=None):
     """Stage 3b. Judge each candidate pain's type and apply the keep_types policy. Recall-safe:
     a candidate the judge fails to return, or a batch that errors, is left for a later pass
     (verified stays NULL = kept by get_pains) rather than silently dropped."""
     verify_cfg = verify_cfg or {}
-    rows = store.get_unverified_pains(run_id)
+    rows = store.get_unverified_pains(run_id, pain_ids=pain_ids)
     candidates = [{
         "id": c["id"], "span": c["verbatim_span"],
         "summary": " | ".join(x for x in (c.get("complaint"), c.get("workflow_pain"),
@@ -676,8 +755,16 @@ def verify_run(store, run_id: str, verify_cfg: dict = None, extract_cfg: dict = 
                                    c.get("verbatim_span")),
     } for c in rows]
     require_verdict = bool(verify_cfg.get("require_verdict", False))
+    # Persist as we go. A full run is ~7,300 judge calls; anything that long WILL be
+    # interrupted, and holding every verdict until the end means an interruption writes
+    # nothing. Measured: 2,200 candidates judged over 80 minutes, zero rows saved.
+    def _save(batch_verdicts):
+        for pid, v in batch_verdicts.items():
+            if v and v.get("verified") is not None:
+                store.set_pain_verdict(pid, v["pain_type"], v["verified"], v["reason"])
+
     verdicts = classify_candidates(candidates, verify_cfg, extract_cfg, progress, should_stop,
-                                   require_verdict=require_verdict)
+                                   require_verdict=require_verdict, on_batch=_save)
     kept, rejected, judged, by_type = 0, 0, 0, {}
     incomplete = []
     for c in candidates:

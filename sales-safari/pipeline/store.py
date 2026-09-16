@@ -1271,19 +1271,34 @@ class Store:
             (run_id,)).fetchall()
         return [dict(zip(cols, r)) for r in rows]
 
-    def get_unverified_pains(self, run_id: str, limit: int | None = None):
+    def get_unverified_pains(self, run_id: str, limit: int | None = None,
+                             pain_ids=None):
         """Stage-3b input: candidate pains awaiting a verdict, each with enough of its
         source doc to judge whether the span is a real, product-shaped pain (a bare span
-        can't be judged - "Sweden's expensive" needs context to tell complaint from advice)."""
+        can't be judged - "Sweden's expensive" needs context to tell complaint from advice).
+
+        `pain_ids` restricts the judge to a named slice. Every pain in run pbfamily0001
+        carries `verified IS NULL` -- `insert_pain` never writes the column, whatever
+        `verify.require_verdict` claims -- so "unverified" means the WHOLE run, 72,610
+        candidates and ~7,300 judge calls. A targeted backfill (say, only the pains inside
+        ranked themes) has to be able to say which ones, or it silently starts a 44-hour job.
+        """
         sql = ("SELECT p.id, p.complaint, p.workflow_pain, p.wish, p.workaround, "
                "p.verbatim_span, p.span_start, d.title, d.raw_markdown "
                "FROM pains p JOIN documents d ON d.id=p.document_id "
                "WHERE p.run_id=? AND p.verified IS NULL")
+        params = [run_id]
+        if pain_ids is not None:
+            ids = list(pain_ids)
+            if not ids:
+                return []
+            sql += " AND p.id IN (%s)" % ",".join("?" * len(ids))
+            params.extend(ids)
         if limit:
             sql += f" LIMIT {int(limit)}"
         cols = ["id", "complaint", "workflow_pain", "wish", "workaround",
                 "verbatim_span", "span_start", "title", "raw_markdown"]
-        return [dict(zip(cols, r)) for r in self.conn.execute(sql, (run_id,)).fetchall()]
+        return [dict(zip(cols, r)) for r in self.conn.execute(sql, params).fetchall()]
 
     def set_pain_verdict(self, pain_id: str, pain_type: str, verified: int, reason: str = ""):
         self.conn.execute(
@@ -1555,24 +1570,39 @@ class Store:
                 "persona_total": counts[0], "theme_total": counts[1]}
 
     def get_viz_themes(self, run_id: str, limit: int = 400):
-        """The `limit` most-supported themes, with the numbers the theme map plots.
+        """The `limit` most-supported themes, with the numbers the opportunity quadrant plots.
 
-        Capped because the map is a scatter: 8,925 dots is a smear, not a chart, and the
+        Capped because the chart is a scatter: 8,925 dots is a smear, not a chart, and the
         tail is themes one or two authors mentioned. The count of what was left out is
         returned so the chart can say so.
+
+        `wtp` and `intensity` are the two axes. `rank` is the stage-9 rank for themes that
+        survived the gate and None for dropped ones, so the chart labels only real
+        candidates.
+
+        Every theme that survived rank is included on top of the author cap. The cap is by
+        distinct authors and rank is not: on pbfamily0001 the 400-author cut-off fell at 7
+        authors, and ranks 2, 6 and 10 (7, 7 and 5 authors) fell off the chart that is
+        supposed to point at them.
         """
         rows = self.conn.execute(
             "SELECT c.id,c.label,d.distinct_authors,d.demand_score,d.pain_intensity,"
-            "d.evidence_count,sf.solvable "
+            "d.evidence_count,sf.solvable,d.willingness_to_pay,r.rank,r.dropped "
             "FROM clusters c JOIN demand_scores d ON d.cluster_id=c.id AND d.run_id=c.run_id "
             "LEFT JOIN soft_filters sf ON sf.cluster_id=c.id AND sf.run_id=c.run_id "
-            "WHERE c.run_id=? ORDER BY d.distinct_authors DESC,d.demand_score DESC "
-            "LIMIT ?", (run_id, max(1, limit))).fetchall()
+            "LEFT JOIN rankings r ON r.cluster_id=c.id AND r.run_id=c.run_id "
+            "WHERE c.run_id=? AND (COALESCE(r.dropped,1)=0 OR c.id IN ("
+            "  SELECT cluster_id FROM demand_scores WHERE run_id=? "
+            "  ORDER BY distinct_authors DESC,demand_score DESC LIMIT ?)) "
+            "ORDER BY d.distinct_authors DESC,d.demand_score DESC",
+            (run_id, run_id, max(1, limit))).fetchall()
         total = self.conn.execute(
             "SELECT COUNT(*) FROM demand_scores WHERE run_id=?", (run_id,)).fetchone()[0]
         return {"total": total, "themes": [
             {"id": r[0], "label": r[1], "authors": r[2] or 0, "demand": r[3] or 0.0,
-             "intensity": r[4] or 0.0, "evidence": r[5] or 0, "solvable": r[6]}
+             "intensity": r[4] or 0.0, "evidence": r[5] or 0, "solvable": r[6],
+             "wtp": r[7] or 0.0,
+             "rank": r[8] if (r[8] is not None and not r[9]) else None}
             for r in rows]}
 
     def get_pain_timeline(self, run_id: str):
