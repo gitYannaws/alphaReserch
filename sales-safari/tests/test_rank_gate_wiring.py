@@ -84,8 +84,8 @@ class RankGateBehaviourTest(unittest.TestCase):
     def _rank_one(self, solvable, allowed):
         from pipeline.s9_rank import rank_run
 
-        # (cluster_id, demand, persistence, saturation, dropped, warnings, solvable)
-        row = ("c1", 5.0, 3.0, 0.0, 0, "[]", solvable)
+        # (cluster_id, demand, persistence, saturation, confidence, warnings, solvable)
+        row = ("c1", 5.0, 3.0, 0.0, 0.9, "[]", solvable)
 
         class _Cursor:
             def __init__(self, rows):

@@ -108,9 +108,9 @@ def report_run(store, run_id: str, out_dir: str = "reports", progress=None,
             # Stage 9 stopped dividing by saturation on 2026-07-20 (it rewarded ignorance -
             # see s9_rank.py). The report kept printing the retired divisor, so the arithmetic
             # it showed did not reproduce the rank score beside it.
-            f"- Rank formula: demand {_fmt(row['demand_score'])} x persistence "
-            f"{_fmt(row['persistence_score'])} x solvable weight "
-            f"{_fmt(row.get('solvable_weight'))}",
+            f"- Rank formula: demand {_fmt(row['demand_score'])} x persistence multiplier "
+            f"{_fmt((row.get('rank_breakdown') or {}).get('persistence_multiplier', row['persistence_score']))}"
+            f" x solvable weight {_fmt(row.get('solvable_weight'))}",
             f"- Persistence: {_fmt(row['persistence_score'])}",
             f"- Saturation (display only, not in rank): {_fmt(row['saturation_score'])}",
             f"- Authors: {row['distinct_authors']}",

@@ -489,7 +489,7 @@ const TERMINAL = new Set(["done","error","cancelled","reported","interrupted"]);
 
 function esc(s){return String(s ?? "").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
 function n(x){return Number(x || 0).toFixed(2);}
-function solvClass(s){return ["yes","partial","no"].includes(s) ? s : "unknown";}
+function solvClass(s){return ["yes","partial","no"].includes(s) ? s : (s === "platform_feature" ? "no" : "unknown");}
 function solvTitle(r){
   if(!r.solvable) return "software-solvable: unclassified";
   const c = r.solvable_confidence!=null ? ` (${Math.round(r.solvable_confidence*100)}% conf)` : "";
@@ -904,7 +904,7 @@ function scoreBreakdownHtml(r){
   const b = r.rank_breakdown || {};
   const ev = r.scoring_evidence || {};
   const rec = ev.recurrence || {};
-  const formula = `${n(b.demand ?? r.demand_score)} x ${n(b.persistence ?? r.persistence_score)} x ${n(b.solvable_weight ?? r.solvable_weight ?? 1)}`;
+  const formula = `${n(b.demand ?? r.demand_score)} x ${n(b.persistence_multiplier ?? b.persistence ?? r.persistence_score)} x ${n(b.solvable_weight ?? r.solvable_weight ?? 1)}`;
   const signals = dim => ((ev[dim] && ev[dim].signals) || []).slice(0,5).join(", ") || "none";
   return `<details class="scorebits"><summary>score breakdown</summary>
     <div><code>${esc(formula)}</code></div>

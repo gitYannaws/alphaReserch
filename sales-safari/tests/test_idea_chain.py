@@ -174,20 +174,21 @@ class RankFormulaTest(unittest.TestCase):
             pass
 
     def test_saturated_theme_is_not_penalised(self):
-        # (id, demand, persistence, saturation, dropped, warnings, solvable)
+        # (id, demand, persistence, saturation, confidence, warnings, solvable)
         store = self._RankStore([
-            ("saturated", 6.0, 3.0, 8.0, 0, "[]", "yes"),
-            ("unknown", 6.0, 3.0, 0.0, 0, "[]", "yes"),
+            ("saturated", 6.0, 3.0, 8.0, 0.9, "[]", "yes"),
+            ("unknown", 6.0, 3.0, 0.0, 0.9, "[]", "yes"),
         ])
         rank_run(store, "run1")
         scores = {r["cluster_id"]: r["rank_score"] for r in store.saved}
         self.assertEqual(scores["saturated"], scores["unknown"])
-        self.assertEqual(scores["saturated"], 18.0)
+        # demand 6 x persistence multiplier (0.75 + 0.5*2/9) x yes 1.0 x (0.5 + 0.5*0.9)
+        self.assertEqual(scores["saturated"], 4.91)
 
     def test_unsolvable_theme_cannot_be_ranked_when_precision_policy_is_enabled(self):
         store = self._RankStore([
-            ("software", 6.0, 3.0, 0.0, 0, "[]", "yes"),
-            ("physical", 9.0, 3.0, 0.0, 0, "[]", "no"),
+            ("software", 6.0, 3.0, 0.0, 0.9, "[]", "yes"),
+            ("physical", 9.0, 3.0, 0.0, 0.9, "[]", "no"),
         ])
         rank_run(store, "run1", allowed_solvability=["yes", "partial"])
 

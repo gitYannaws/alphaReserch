@@ -69,7 +69,8 @@ class _ReportStore:
             dropped = i >= 2
             rows.append({
                 "rank": None if dropped else i + 1,
-                "rank_score": 0.0 if dropped else 12.0,
+                # 4.0 demand x 0.86 persistence multiplier (raw 3.0) x 1.0 = 3.44
+                "rank_score": 0.0 if dropped else 3.44,
                 "demand_score": 4.0,
                 "persistence_score": 3.0,
                 "saturation_score": 2.0,
@@ -90,7 +91,7 @@ class _ReportStore:
                 "reachability": 2.0,
                 "recurrence_score": 10.0,
                 "scoring_evidence": {},
-                "rank_breakdown": {},
+                "rank_breakdown": {"persistence": 3.0, "persistence_multiplier": 0.86},
             })
         return rows if include_dropped else [r for r in rows if not r["dropped"]]
 
@@ -125,7 +126,11 @@ class ReportHonestyTests(unittest.TestCase):
         self.assertIn("5 themes total; 3 were dropped at rank", self.text)
 
     def test_formula_matches_stage_9(self):
-        self.assertIn("demand 4.00 x persistence 3.00 x solvable weight 1.00", self.text)
+        # Rank multiplies the BOUNDED persistence multiplier, not the raw 1-10 score; the
+        # printed arithmetic must reproduce the stored rank score (4.00 x 0.86 x 1.00 = 3.44).
+        self.assertIn("demand 4.00 x persistence multiplier 0.86 x solvable weight 1.00", self.text)
+        self.assertIn("Rank score: 3.44", self.text)
+        self.assertNotIn("x persistence 3.00 x", self.text)
         self.assertNotIn("(1 + saturation", self.text)
 
 
