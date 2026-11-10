@@ -422,6 +422,12 @@ def _migrate(conn):
     _ensure_column(conn, "pains", "verify_reason", "verify_reason TEXT")
     # Stage 7 (regex warning tags) merged into 7b: one advisory pass, one row per theme.
     _ensure_column(conn, "soft_filters", "warnings", "warnings TEXT")
+    _ensure_column(conn, "soft_filters", "evidence", "evidence TEXT")
+    # 54% of pbfamily0001's eligible pains were HDBSCAN noise with no row anywhere, so
+    # nobody could audit whether they were junk or signal. NULL = never clustered.
+    _ensure_column(conn, "pains", "cluster_noise", "cluster_noise INTEGER")
+    _ensure_column(conn, "clusters", "cohesion", "cohesion REAL")
+    _ensure_column(conn, "clusters", "audit_label_source", "audit_label_source TEXT")
     _ensure_column(conn, "runs", "inherited_doc_count", "inherited_doc_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_topic_count", "inherited_topic_count INTEGER DEFAULT 0")
     _ensure_column(conn, "runs", "inherited_author_count", "inherited_author_count INTEGER DEFAULT 0")
@@ -1360,21 +1366,33 @@ class Store:
         self.conn.execute("DELETE FROM clusters WHERE run_id=?", (run_id,))
         for cid in ids:
             self.conn.execute("DELETE FROM cluster_members WHERE cluster_id=?", (cid,))
+        self.conn.execute("UPDATE pains SET cluster_noise=NULL WHERE run_id=?", (run_id,))
         self.conn.commit()
 
-    def save_cluster(self, cid: str, run_id: str, label: str, size: int, distinct_authors: int, pain_ids):
-        self.conn.execute("INSERT OR REPLACE INTO clusters(id,run_id,label,size,distinct_authors) VALUES(?,?,?,?,?)",
-                          (cid, run_id, label, size, distinct_authors))
+    def save_cluster(self, cid: str, run_id: str, label: str, size: int, distinct_authors: int, pain_ids,
+                     cohesion: float = None, audit_label_source: str = None):
+        self.conn.execute("INSERT OR REPLACE INTO clusters(id,run_id,label,size,distinct_authors,"
+                          "cohesion,audit_label_source) VALUES(?,?,?,?,?,?,?)",
+                          (cid, run_id, label, size, distinct_authors, cohesion, audit_label_source))
         for pid in pain_ids:
             self.conn.execute("INSERT INTO cluster_members(cluster_id,pain_id) VALUES(?,?)", (cid, pid))
         self.conn.commit()
 
+    def set_cluster_noise(self, pain_ids, member_ids):
+        """Flag every clustered pain: 0 inside a final theme, 1 left outside as noise."""
+        members = set(member_ids)
+        self.conn.executemany("UPDATE pains SET cluster_noise=? WHERE id=?",
+                              [(0 if pid in members else 1, pid) for pid in pain_ids])
+        self.conn.commit()
+
     def representative_text(self, pain_ids):
-        q = "SELECT complaint, workflow_pain, wish, verbatim_span FROM pains WHERE id IN (%s)" % \
+        """First usable text in `pain_ids` order; stage 5 passes the most central member first."""
+        q = "SELECT id, complaint, workflow_pain, wish, verbatim_span FROM pains WHERE id IN (%s)" % \
             ",".join("?" * len(pain_ids))
         bad = {"1", ".", "-", "n/a", "na", "none", "null", "unknown"}
-        for row in self.conn.execute(q, pain_ids).fetchall():
-            for field in row:
+        rows = {r[0]: r[1:] for r in self.conn.execute(q, pain_ids).fetchall()}
+        for pid in pain_ids:
+            for field in rows.get(pid, ()):
                 if not field:
                     continue
                 text = field.strip()
@@ -1399,7 +1417,7 @@ class Store:
         sql = ("SELECT c.id,c.label,c.size,c.distinct_authors,p.id,p.complaint,"
                "p.workflow_pain,p.workaround,p.wish,p.persona,p.verbatim_span,"
                "p.source_permalink,p.author_hash,d.source_granularity,d.score,d.thread_url,"
-               "d.title,d.created_at "
+               "d.title,d.created_at,c.cohesion,c.audit_label_source "
                "FROM clusters c "
                "JOIN cluster_members cm ON cm.cluster_id=c.id "
                "JOIN pains p ON p.id=cm.pain_id "
@@ -1423,6 +1441,8 @@ class Store:
                     "label": r[1],
                     "size": r[2],
                     "distinct_authors": r[3],
+                    "cohesion": r[18],
+                    "audit_label_source": r[19],
                     "pains": [],
                 }
             clusters[cid]["pains"].append({
@@ -1695,14 +1715,16 @@ class Store:
         self.conn.commit()
 
     def save_soft_filter(self, run_id: str, cluster_id: str, solvable: str,
-                         confidence: float, reason: str, warnings=None):
+                         confidence: float, reason: str, warnings=None, evidence=None):
         """One advisory row per theme: software-fit (LLM) + warning tags (regex, stage-7
-        patterns folded in here). `warnings` is a list of tag names, stored as JSON."""
+        patterns folded in here). `warnings` is a list of tag names, stored as JSON;
+        `evidence` is the buyer-test field dict, NULL when the model was never asked."""
         self.conn.execute(
             "INSERT OR REPLACE INTO soft_filters"
-            "(cluster_id,run_id,solvable,confidence,reason,warnings) VALUES(?,?,?,?,?,?)",
+            "(cluster_id,run_id,solvable,confidence,reason,warnings,evidence) VALUES(?,?,?,?,?,?,?)",
             (cluster_id, run_id, solvable, confidence, reason,
-             json.dumps(list(warnings or []))))
+             json.dumps(list(warnings or [])),
+             None if evidence is None else json.dumps(evidence)))
         self.conn.commit()
 
     # ---- stage 7.6: sentiment ----

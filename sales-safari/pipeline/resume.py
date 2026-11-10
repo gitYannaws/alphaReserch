@@ -367,12 +367,14 @@ class Runner:
                         min_cluster_size=cc.get("min_cluster_size", 2),
                         min_cohesion=cc.get("min_cohesion", 0.55),
                         cluster_selection_method=cc.get("cluster_selection_method", "leaf"),
+                        min_samples=cc.get("min_samples"),
+                        cluster_selection_epsilon=cc.get("cluster_selection_epsilon", 0.0),
                         semantic_refine=cc.get("semantic_refine", True),
                         semantic_label_only=cc.get("semantic_label_only", False),
                         audit_min_cluster_size=cc.get("audit_min_cluster_size", 5),
                         extract_cfg=self.cfg.get("extract", {}),
                         progress=lambda d, t: self._set_progress(5, d, t, "steps"))
-        return f"clusters={r['clusters']}"
+        return f"clusters={r['clusters']} noise={r['noise']} dbcv={r.get('dbcv')}"
 
     def _demand(self, store):
         from pipeline.s6_demand import demand_run

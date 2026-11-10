@@ -414,6 +414,8 @@ def _analyze_stages(job: dict, job_id: str, store, run_cfg: dict):
         min_cluster_size=_cl_cfg.get("min_cluster_size", 2),
         min_cohesion=_cl_cfg.get("min_cohesion", 0.55),
         cluster_selection_method=_cl_cfg.get("cluster_selection_method", "leaf"),
+        min_samples=_cl_cfg.get("min_samples"),
+        cluster_selection_epsilon=_cl_cfg.get("cluster_selection_epsilon", 0.0),
         semantic_refine=_cl_cfg.get("semantic_refine", True),
         semantic_label_only=_cl_cfg.get("semantic_label_only", False),
         audit_min_cluster_size=_cl_cfg.get("audit_min_cluster_size", 5),

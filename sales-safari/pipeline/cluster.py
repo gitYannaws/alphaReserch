@@ -46,14 +46,18 @@ def _unit(X: np.ndarray) -> np.ndarray:
     return X / (np.linalg.norm(X, axis=1, keepdims=True) + _EPS)
 
 
+def _centroid_sims(X: np.ndarray) -> np.ndarray:
+    """Cosine similarity of each member to the group's unit centroid."""
+    Xn = _unit(X)
+    c = Xn.mean(axis=0)
+    return Xn @ (c / (np.linalg.norm(c) + _EPS))
+
+
 def _cohesion(X: np.ndarray) -> float:
     """Mean cosine similarity of members to their unit centroid (~theme tightness)."""
     if len(X) <= 1:
         return 1.0
-    Xn = _unit(X)
-    c = Xn.mean(axis=0)
-    c = c / (np.linalg.norm(c) + _EPS)
-    return float((Xn @ c).mean())
+    return float(_centroid_sims(X).mean())
 
 
 def _reduce(X: np.ndarray) -> np.ndarray:
@@ -167,6 +171,8 @@ def _merge_duplicate_labels(groups: list[tuple[np.ndarray, str]]) -> tuple[list,
 def cluster_run(store, run_id: str, min_cluster_size: int = 2,
                 min_cohesion: float = 0.55,
                 cluster_selection_method: str = "leaf",
+                min_samples: int | None = None,
+                cluster_selection_epsilon: float = 0.0,
                 semantic_refine: bool = True,
                 audit_min_cluster_size: int = DEFAULT_AUDIT_MIN_CLUSTER_SIZE,
                 extract_cfg: dict = None,
@@ -177,6 +183,7 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
     rows = store.get_embeddings(run_id)
     if len(rows) < min_cluster_size:
         store.clear_clusters(run_id)
+        store.set_cluster_noise([r[0] for r in rows], [])
         if progress:
             progress(1, 1)
         return {"clusters": 0, "noise": len(rows), "reason": "too few pains"}
@@ -191,8 +198,18 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
     Xr = _reduce(X)
     if progress:
         progress(1, 3)
-    labels = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, metric="euclidean",
-                             cluster_selection_method=cluster_selection_method).fit_predict(Xr)
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples,
+                                cluster_selection_epsilon=cluster_selection_epsilon,
+                                metric="euclidean", gen_min_span_tree=True,
+                                cluster_selection_method=cluster_selection_method)
+    labels = clusterer.fit_predict(Xr)
+    # DBCV of HDBSCAN's own labels (before cohesion splits and the audit). A diagnostic only:
+    # it raises or goes NaN on degenerate labelings, which must not fail the stage.
+    try:
+        dbcv = float(clusterer.relative_validity_)
+        dbcv = round(dbcv, 4) if np.isfinite(dbcv) else None
+    except Exception:
+        dbcv = None
     if progress:
         progress(2, 3)
 
@@ -237,16 +254,21 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
     final, duplicate_merges = _merge_duplicate_labels(final)
     store.clear_clusters(run_id)
     for lab, (part, refined_label) in enumerate(final):
-        pids = [ids[i] for i in part]
+        pids = [ids[i] for i in part[np.argsort(-_centroid_sims(X[part]))]]
         distinct_authors = len({authors[i] for i in part if authors[i]})
         label = refined_label or store.representative_text(pids)[:120]
-        store.save_cluster(f"{run_id}-{lab}", run_id, label, len(pids), distinct_authors, pids)
+        store.save_cluster(f"{run_id}-{lab}", run_id, label, len(pids), distinct_authors, pids,
+                           cohesion=_cohesion(X[part]),
+                           audit_label_source="audit" if refined_label else "quote")
+    member_ids = [ids[i] for part, _ in final for i in part]
+    store.set_cluster_noise(list(ids), member_ids)
 
-    noise = len(rows) - sum(len(p) for p in final)
+    noise = len(rows) - len(member_ids)
     if progress:
         progress(3, 3)
     return {
         "clusters": len(final), "noise": int(noise), "split_megaclusters": split_count,
         "semantic_audited": audited, "semantic_splits": semantic_splits,
         "semantic_rejected": semantic_rejected, "duplicate_merges": duplicate_merges,
+        "dbcv": dbcv,
     }
