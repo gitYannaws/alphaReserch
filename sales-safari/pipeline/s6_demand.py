@@ -1,6 +1,6 @@
 """Stage 6: score demand without considering competition."""
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import re
 
@@ -33,24 +33,40 @@ INTENSITY_TERMS = {
     # added: how people in THIS corpus say a thing hurts
     "tired of", "sick of", "desperate", "struggle", "struggling", "worst",
     "miserable", "terrible", "awful", "garbage", "trash", "ridiculous",
-    "nightmare", "give up", "gave up", "useless", "hopeless",
-    # dropped "manual" and "tedious": B2B workflow words, under 50 hits in 72,610 texts
+    "nightmare", "give up", "useless", "hopeless",
+    # dropped "manual" and "tedious": B2B workflow words, under 50 hits in 72,610 texts.
+    # "gave up" moved to CONSEQUENCE_TERMS: having quit is a cost, not a mood.
+}
+# Intensity is tiered by CONSEQUENCE. On pbfamily0001 it was driven by "hard", "frustrated"
+# and "can't", and 141 ranked themes had nothing else, so a theme that merely sounds annoyed
+# tied one whose members say what the pain cost them. Bare "fine" is left out: in the ranked
+# themes it reads "you're going to be fine" and "fine dining", never a penalty.
+CONSEQUENCE_TERMS = {
+    "hours", "lost", "missed", "fined", "fines", "paid a fine", "got a fine", "deadline",
+    "cost me", "wasted", "late fee", "penalty", "overstay", "overstayed", "got scammed",
+    "lost money", "every day", "every time", "for months", "for years", "gave up",
 }
 
-# WTP is TIERED, because a flat keyword bag measured the wrong thing. "expensive" fires the
-# same on an expensive dating subscription and on expensive drinks, and the flat version put
-# "Expensive dates" at rank 1 and "Overpriced items" at rank 6 off exactly that confusion.
-# Strong terms are money changing hands FOR A PRODUCT OR SERVICE, or a verdict on whether it
-# was worth paying. Weak terms are generic spending, which is context, not demand.
+# WTP is graded by TENSE: "anything involving the future is an over-optimistic lie" (The Mom
+# Test). Strong is money already changing hands, or a price anchor. Weak is hypothetical or
+# generic money talk, which "expensive drinks" shares with "expensive subscription" (how
+# "Expensive dates" once reached rank 1). "scam" is in neither tier: it is a fraud complaint.
 WTP_STRONG_TERMS = {
-    "pay for", "paying for", "paid for", "premium", "subscription", "subscriptions",
-    "would pay", "worth paying", "happy to pay", "worth it", "not worth",
-    "overpriced", "rip off", "waste of money", "wasted money", "paywall",
-    "free trial", "scam",
+    "i paid", "i pay", "paying for", "paid for", "i subscribe", "my subscription",
+    "switched from", "hired a", "bought a", "worth paying", "not worth", "premium",
+    "paywall", "free trial",
 }
+# A period needs a number in front of it: bare "a month" in the ranked themes is "once a
+# month" and "in about a month", not a price.
+WTP_AMOUNT_PATTERNS = (
+    r"[$€£]\s?\d+(?:[.,]\d+)*k?",
+    r"\d+(?:[.,]\d+)*k?\s?[€£]",
+    r"\b\d+(?:[.,]\d+)*k?\s?(?:usd|dollars|bucks|pesos|baht|php|euros?)\b",
+    r"\b\d+(?:[.,]\d+)*k?\s?(?:/\s?mo(?:nth)?|a month|per month|per year)\b",
+)
 WTP_WEAK_TERMS = {
-    "pay", "paid", "paying", "price", "cost", "costs", "expensive", "cheap",
-    "afford", "money", "budget", "buy", "bought", "fee", "fees", "dollars",
+    "would pay", "worth it", "price", "expensive", "cheap", "cost", "costs", "afford",
+    "budget", "fee", "fees", "money",
 }
 
 # Reachability = can we FIND these buyers and speak to them? In a forum corpus that means
@@ -99,14 +115,13 @@ def _texts(cluster: dict):
             "verbatim_span"))
 
 
+def _term_regex(term: str) -> str:
+    return r"(?<![a-z0-9])" + re.escape(term).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
+
+
 def _term_hits(text: str, terms: set) -> list:
     low = text.lower()
-    hits = []
-    for term in terms:
-        pattern = r"(?<![a-z0-9])" + re.escape(term).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
-        if re.search(pattern, low):
-            hits.append(term)
-    return sorted(hits)
+    return sorted(term for term in terms if re.search(_term_regex(term), low))
 
 
 def _term_score(text: str, terms: set, base: float = 2.0) -> tuple[float, list]:
@@ -114,17 +129,76 @@ def _term_score(text: str, terms: set, base: float = 2.0) -> tuple[float, list]:
     return min(10.0, base + len(hits) * 1.5), hits
 
 
-def _wtp_score(text: str) -> tuple[float, list]:
-    """Willingness to pay, weighting proof of payment above mentions of money.
+# Every text signal of demand is an evidence class matched PER PAIN, and a component reads
+# the share of the theme's distinct authors whose own pain carries the class. Matching over
+# the concatenated theme text let one member's "premium" light the whole theme.
+EVIDENCE_CLASSES = {
+    cls: tuple(re.compile(p) for p in patterns) for cls, patterns in {
+        "wtp_strong": [_term_regex(t) for t in WTP_STRONG_TERMS] + list(WTP_AMOUNT_PATTERNS),
+        "wtp_weak": [_term_regex(t) for t in WTP_WEAK_TERMS],
+        "intensity_consequence": [_term_regex(t) for t in CONSEQUENCE_TERMS],
+        "intensity_generic": [_term_regex(t) for t in INTENSITY_TERMS],
+    }.items()
+}
+# component -> (floor, points each class adds when every author carries it)
+SHARE_COMPONENTS = {
+    "willingness_to_pay": (1.0, {"wtp_strong": 6.0, "wtp_weak": 3.0}),
+    "pain_intensity": (3.0, {"intensity_consequence": 4.0, "intensity_generic": 3.0}),
+}
 
-    A theme saying "expensive" alone now scores 1.6. A theme saying "paying for", "premium"
-    and "not worth" scores 8.5. Before, both were flat keyword counts and the corpus's
-    ordinary travel spending outranked evidence that anyone pays for software.
-    """
-    strong = _term_hits(text, WTP_STRONG_TERMS)
-    weak = _term_hits(text, WTP_WEAK_TERMS)
-    score = min(10.0, 1.0 + 2.5 * len(strong) + 0.6 * len(weak))
-    return round(score, 2), strong + weak
+
+def _author_key(pain: dict):
+    return pain.get("author_hash") or pain.get("id")
+
+
+def _pain_text(pain: dict) -> str:
+    # No persona: it is the extractor's label for the poster, and "frustrated user" alone gave
+    # 84 ranked pains on pbfamily0001 an intensity hit their author never wrote. 954 of those
+    # 5,376 pains spell "can’t" with a curly apostrophe.
+    return " ".join(str(pain.get(k) or "") for k in (
+        "complaint", "workflow_pain", "workaround", "wish", "verbatim_span",
+    )).lower().replace("\u2019", "'")
+
+
+def _evidence_table(pains: list) -> tuple[dict, int]:
+    authors = set()
+    table = {cls: {"authors": set(), "signals": set(), "quotes": []} for cls in EVIDENCE_CLASSES}
+    for pain in pains:
+        author = _author_key(pain)
+        authors.add(author)
+        text = _pain_text(pain)
+        for cls, patterns in EVIDENCE_CLASSES.items():
+            hits = {" ".join(m.group(0).split()) for m in (rx.search(text) for rx in patterns) if m}
+            if not hits:
+                continue
+            row = table[cls]
+            quote = _quote(pain)
+            if quote and author not in row["authors"] and len(row["quotes"]) < 3:
+                row["quotes"].append(quote)
+            row["authors"].add(author)
+            row["signals"] |= hits
+    return table, len(authors)
+
+
+def _share_score(table: dict, distinct: int, component: str) -> tuple[float, dict]:
+    floor, points = SHARE_COMPONENTS[component]
+    score, evidence = floor, {}
+    for cls, full in points.items():
+        row = table[cls]
+        share = len(row["authors"]) / distinct if distinct else 0.0
+        score += full * share
+        evidence[cls] = {
+            "authors_with_signal": len(row["authors"]),
+            "distinct_authors": distinct,
+            "share": round(share, 2),
+            "signals": sorted(row["signals"]),
+            "quotes": row["quotes"],
+        }
+    return round(min(10.0, score), 2), {
+        "signals": [s for cls in points for s in evidence[cls]["signals"]],
+        "quotes": [q for cls in points for q in evidence[cls]["quotes"]][:3],
+        **evidence,
+    }
 
 
 def _endorsement(cluster: dict, cap: float = 3.0) -> tuple[float, dict]:
@@ -151,24 +225,12 @@ def _weighted_score(parts: dict, weights: dict) -> float:
     return round(sum(parts[k] * float(weights.get(k, 1)) for k in parts) / total_weight, 2)
 
 
-def _quotes_for_terms(cluster: dict, terms: list, limit: int = 3) -> list:
-    out = []
-    for p in cluster["pains"]:
-        quote = str(p.get("verbatim_span") or "").strip()
-        if not quote:
-            continue
-        low = " ".join(str(p.get(k) or "") for k in (
-            "complaint", "workflow_pain", "workaround", "wish", "persona",
-            "verbatim_span")).lower()
-        if not terms or any(t in low for t in terms):
-            out.append({
-                "quote": quote[:220],
-                "source": p.get("source_permalink") or "",
-                "persona": p.get("persona") or "",
-            })
-        if len(out) >= limit:
-            break
-    return out
+def _quote(pain: dict):
+    quote = str(pain.get("verbatim_span") or "").strip()
+    if not quote:
+        return None
+    return {"quote": quote[:220], "source": pain.get("source_permalink") or "",
+            "persona": pain.get("persona") or ""}
 
 
 def _token_key(text: str) -> tuple:
@@ -207,7 +269,7 @@ def _recurrence(cluster: dict, full_at: dict) -> tuple[float, dict]:
         "distinct_threads": len(threads),
         "workaround_count": workaround_count,
         "repeated_patterns": [" ".join(k) for k in repeated_phrases[:3]],
-        "quotes": _quotes_for_terms(cluster, [], limit=3),
+        "quotes": [q for q in map(_quote, pains) if q][:3],
     }
 
 
@@ -256,6 +318,30 @@ def _persistence(cluster: dict, text: str, corpus_latest, full_at: dict) -> tupl
     }
 
 
+def _momentum(cluster: dict, corpus_latest, full_at: dict) -> tuple[float, dict]:
+    """Distinct authors raising the pain in the corpus's last 12 months.
+
+    Persistence rewards age: a pain first seen last year topped out near 4-5 however many
+    people raised it, so an emerging pain could not reach the top. Momentum counts the recent
+    voices on their own curve, full at half the frequency anchor.
+    """
+    full = full_at["voices"] / 2
+    dated = [(p, d) for p in cluster["pains"] if (d := _parse_date(p.get("created_at")))]
+    if not dated or corpus_latest is None:
+        return 0.0, {"method": "undated", "recent_authors": 0, "dated_pains": len(dated),
+                     "note": "no complaint dates, so no momentum can be measured"}
+    cutoff = corpus_latest - timedelta(days=365)
+    recent = {_author_key(p) for p, d in dated if d >= cutoff}
+    return round(_log_scale(len(recent), full), 2), {
+        "method": "dates",
+        "recent_authors": len(recent),
+        "full_at_authors": full,
+        "dated_pains": len(dated),
+        "undated_pains": len(cluster["pains"]) - len(dated),
+        "window_start": cutoff.date().isoformat(),
+    }
+
+
 def corpus_latest_date(clusters: list):
     """The newest complaint anywhere in the run: the "now" that persistence measures against.
 
@@ -280,7 +366,9 @@ def score_cluster(cluster: dict, weights: dict, corpus_latest=None,
 
     full_at = {**DEFAULT_FULL_SCORE_AT, **(full_at or {})}
 
-    pain_intensity, intensity_hits = _term_score(text, INTENSITY_TERMS, base=3.0)
+    table, table_authors = _evidence_table(cluster["pains"])
+    pain_intensity, intensity_evidence = _share_score(table, table_authors, "pain_intensity")
+    willingness_to_pay, wtp_evidence = _share_score(table, table_authors, "willingness_to_pay")
     endorsement, endorsement_evidence = _endorsement(cluster)
     # Distinct authors are the market signal. Repeat posts by the same people count half,
     # and upvotes (silent agreement) ride in as bonus voices -- INSIDE the log, so the
@@ -289,13 +377,13 @@ def score_cluster(cluster: dict, weights: dict, corpus_latest=None,
               + 0.5 * max(0, evidence_count - distinct_authors)
               + endorsement)
     frequency = round(_log_scale(voices, full_at["voices"]), 2)
-    willingness_to_pay, wtp_hits = _wtp_score(text)
     reachability, reach_hits = _term_score(text, REACHABILITY_TERMS, base=2.0)
     if evidence_count:
         reachability = min(10.0, reachability + (post_level / evidence_count) * 2.0)
     recurrence_score, recurrence_evidence = _recurrence(cluster, full_at)
     persistence_score, persistence_evidence = _persistence(
         cluster, text, corpus_latest, full_at)
+    momentum, momentum_evidence = _momentum(cluster, corpus_latest, full_at)
 
     parts = {
         "pain_intensity": round(pain_intensity, 2),
@@ -303,34 +391,36 @@ def score_cluster(cluster: dict, weights: dict, corpus_latest=None,
         "willingness_to_pay": round(willingness_to_pay, 2),
         "reachability": round(reachability, 2),
         "recurrence_score": recurrence_score,
+        "momentum": momentum,
     }
     return {
         **parts,
         "persistence_score": persistence_score,  # rank multiplier, NOT in the demand average
-        "demand_score": _weighted_score(parts, weights),
+        # A source with no dates has no momentum to measure. Leaving the zero in the average
+        # would dock an undated theme 2/16 of its demand for a fact about the collector, not
+        # the pain, so the term is averaged only when the dates exist.
+        "demand_score": _weighted_score(
+            parts if momentum_evidence.get("method") == "dates"
+            else {k: v for k, v in parts.items() if k != "momentum"},
+            {"momentum": 2, **weights}),
         "evidence_count": evidence_count,
         "distinct_authors": distinct_authors,
         "scoring_evidence": {
-            "pain_intensity": {
-                "signals": intensity_hits,
-                "quotes": _quotes_for_terms(cluster, intensity_hits),
-            },
+            "pain_intensity": intensity_evidence,
             "frequency": {
                 "distinct_authors": distinct_authors,
                 "evidence_count": evidence_count,
                 "post_level_evidence": post_level,
                 "endorsement": endorsement_evidence,
             },
-            "willingness_to_pay": {
-                "signals": wtp_hits,
-                "quotes": _quotes_for_terms(cluster, wtp_hits),
-            },
+            "willingness_to_pay": wtp_evidence,
             "reachability": {
                 "signals": reach_hits,
                 "post_level_evidence": post_level,
             },
             "recurrence": recurrence_evidence,
             "persistence": persistence_evidence,
+            "momentum": {"score": momentum, **momentum_evidence},
         },
     }
 

@@ -16,6 +16,10 @@ computed and then thrown away by a ceiling or a proxy.
 
 After: frequency and recurrence pin at 10 on ZERO themes, persistence has 686 distinct
 values across 1.0-9.53, and the median size of the top 20 rose from 6 to 9.
+
+4. Persistence then became the strongest rank driver (+0.62) while rewarding age: a pain first
+   seen last year topped out near 4-5 however many people raised it. Momentum counts the
+   distinct authors of the last 12 months, so an emerging pain can score.
 """
 from __future__ import annotations
 
@@ -33,7 +37,9 @@ NOW = datetime(2026, 8, 18, tzinfo=timezone.utc)
 
 
 def _cluster(authors=5, pains=None, threads=1, days_ago=None, score=None):
-    """A theme with `authors` distinct authors, one pain each unless `pains` says otherwise."""
+    """A theme with `authors` distinct authors, one pain each unless `pains` says otherwise.
+
+    Pain i is written by author i % authors and dated `days_ago[i % len(days_ago)]`."""
     n = pains if pains is not None else authors
     days_ago = days_ago if days_ago is not None else [10] * n
     return {
@@ -42,6 +48,8 @@ def _cluster(authors=5, pains=None, threads=1, days_ago=None, score=None):
         "size": n,
         "distinct_authors": authors,
         "pains": [{
+            "id": "p%d" % i,
+            "author_hash": "a%d" % (i % authors),
             "complaint": "wire fees are painful",
             "workflow_pain": "", "workaround": "", "wish": "", "persona": "",
             "verbatim_span": "wire fees are painful",
@@ -149,6 +157,48 @@ class PersistenceFromDatesTests(unittest.TestCase):
         self.assertEqual(first, second)
         aged, _ = _persistence(cluster, "", latest + timedelta(days=400), {"months": 36})
         self.assertLess(aged, first, "a later 'now' should read as less live, if we used it")
+
+
+class MomentumTests(unittest.TestCase):
+    def _score(self, weights=WEIGHTS, **kw):
+        return score_cluster(_cluster(**kw), weights, NOW)
+
+    def test_a_young_surge_outscores_an_old_trickle(self):
+        surge = self._score(authors=8, days_ago=[270, 200, 150, 120, 90, 60, 30, 10])
+        trickle = self._score(authors=8, days_ago=[1100, 1000, 900, 800, 700, 600, 500, 20])
+        self.assertGreater(surge["demand_score"], trickle["demand_score"],
+                           "the two themes differ only in when they were raised")
+        self.assertGreater(surge["momentum"], trickle["momentum"])
+
+    def test_momentum_counts_people_not_posts(self):
+        one_voice = self._score(authors=1, pains=8, days_ago=[10])
+        eight_voices = self._score(authors=8, days_ago=[10])
+        self.assertLess(one_voice["momentum"], eight_voices["momentum"])
+
+    def test_an_undated_theme_has_no_momentum_and_says_why(self):
+        cluster = _cluster(authors=5)
+        for pain in cluster["pains"]:
+            pain["created_at"] = None
+        result = score_cluster(cluster, WEIGHTS, None)
+        self.assertEqual(result["momentum"], 0.0)
+        self.assertEqual(result["scoring_evidence"]["momentum"]["method"], "undated")
+
+    def test_an_undated_theme_is_not_docked_for_the_missing_signal(self):
+        """Momentum leaves the average when there are no dates: the demand of an undated
+        theme equals the five-part average, not that average dragged down by a zero."""
+        cluster = _cluster(authors=5)
+        for pain in cluster["pains"]:
+            pain["created_at"] = None
+        result = score_cluster(cluster, WEIGHTS, None)
+        five_parts = {k: result[k] for k in WEIGHTS}
+        expected = round(sum(five_parts[k] * WEIGHTS[k] for k in WEIGHTS) / sum(WEIGHTS.values()), 2)
+        self.assertEqual(result["demand_score"], expected)
+
+    def test_an_old_config_without_the_key_weights_momentum_at_two(self):
+        kw = dict(authors=6, days_ago=[900, 600, 300, 100, 30, 5])
+        missing = self._score(**kw)["demand_score"]
+        self.assertEqual(missing, self._score(weights={**WEIGHTS, "momentum": 2}, **kw)["demand_score"])
+        self.assertNotEqual(missing, self._score(weights={**WEIGHTS, "momentum": 1}, **kw)["demand_score"])
 
 
 class EveryCallSitePassesTheKnobs(unittest.TestCase):
