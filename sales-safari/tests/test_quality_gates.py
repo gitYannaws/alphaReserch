@@ -68,7 +68,7 @@ class _SoftFilterStore:
         self.saved.clear()
 
     def save_soft_filter(self, run_id, cluster_id, solvable, confidence, reason,
-                         warnings=None):
+                         warnings=None, evidence=None):
         self.saved.append((cluster_id, solvable, confidence, reason))
         self.warnings = getattr(self, "warnings", {})
         self.warnings[cluster_id] = list(warnings or [])

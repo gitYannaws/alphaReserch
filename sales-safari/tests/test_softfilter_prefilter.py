@@ -45,9 +45,10 @@ class _Store:
     def clear_soft_filters(self, run_id):
         self.rows.clear()
 
-    def save_soft_filter(self, run_id, cluster_id, solvable, conf, reason, warnings):
+    def save_soft_filter(self, run_id, cluster_id, solvable, conf, reason, warnings,
+                         evidence=None):
         self.rows[cluster_id] = {"solvable": solvable, "confidence": conf,
-                                 "reason": reason, "warnings": warnings}
+                                 "reason": reason, "warnings": warnings, "evidence": evidence}
 
     def set_stage(self, run_id, stage, status):
         pass
@@ -67,7 +68,9 @@ class PrefilterTests(unittest.TestCase):
             import json as _json
             ids = [t["id"] for t in _json.loads(prompt.split("THEMES:\n", 1)[1])]
             return (_json.dumps([{"id": i, "solvable": "yes", "confidence": 0.9,
-                                  "reason": "software"} for i in ids]), "test")
+                                  "reason": "software",
+                                  "evidence": {"workaround": True, "cost": True}}
+                                 for i in ids]), "test")
 
         original = s7b_softfilter._call_extractor
         s7b_softfilter._call_extractor = fake
@@ -117,7 +120,8 @@ class VerdictsLandOnTheRightTheme(unittest.TestCase):
         def fake(prompt, cfg):
             import json as _json
             return (_json.dumps([
-                {"id": "asked", "solvable": "yes", "confidence": 0.9, "reason": "ok"},
+                {"id": "asked", "solvable": "yes", "confidence": 0.9, "reason": "ok",
+                 "evidence": {"workaround": True, "cost": True}},
                 {"id": "skipped", "solvable": "no", "confidence": 0.9, "reason": "echoed"},
                 {"id": "invented", "solvable": "yes", "confidence": 1.0, "reason": "made up"},
             ]), "test")
