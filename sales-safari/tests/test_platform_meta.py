@@ -12,13 +12,17 @@ Two rules are under test, and they are deliberately different from the other war
   venue chatter, because this tag can be configured to DROP.
 - Warnings stay advisory BY DEFAULT. `rank.drop_warnings` is the operator naming, in config,
   the few that disqualify. With it empty, nothing changes.
+
+At a 0.5 share, "spamming issues" (0.29), "writing is difficult to read" (0.17) and
+"frustration with baseless accusations and derailment of topics" (0.00) still ranked 6, 17
+and 11. The bar is now 0.3, the vocabulary names posts, threads, OPs and formatting, and
+`argument_chatter` catches posters insulting each other, which names no venue at all.
 """
 from __future__ import annotations
 
 import unittest
 
-from pipeline.s7_filters import (PLATFORM_META_MIN_SHARE, evaluate_cluster,
-                                 platform_meta_share)
+from pipeline.s7_filters import evaluate_cluster, platform_meta_share, share_tag_share
 from pipeline.s9_rank import rank_run
 
 META = "the mods on this subreddit keep deleting my posts"
@@ -43,16 +47,69 @@ class ShareRuleTests(unittest.TestCase):
         self.assertEqual(platform_meta_share(cluster), 0.2)
         self.assertEqual(evaluate_cluster(cluster, ["platform_meta"]), [])
 
-    def test_the_threshold_is_a_majority(self):
-        self.assertGreaterEqual(PLATFORM_META_MIN_SHARE, 0.5)
-        half = _cluster([META, META, MARKET, MARKET])
-        self.assertEqual(evaluate_cluster(half, ["platform_meta"]), ["platform_meta"])
+    def test_a_third_of_the_members_is_enough(self):
+        """"spamming issues" escaped the old majority bar at 0.29."""
+        third = _cluster([META, MARKET, MARKET])
+        self.assertEqual(evaluate_cluster(third, ["platform_meta"]), ["platform_meta"])
+        quarter = _cluster([META, MARKET, MARKET, MARKET])
+        self.assertEqual(evaluate_cluster(quarter, ["platform_meta"]), [])
 
     def test_a_pure_market_theme_is_never_flagged(self):
         self.assertEqual(evaluate_cluster(_cluster([MARKET] * 6), ["platform_meta"]), [])
 
     def test_an_empty_theme_does_not_divide_by_zero(self):
         self.assertEqual(platform_meta_share({"pains": []}), 0.0)
+
+
+BOTH = ["platform_meta", "argument_chatter"]
+SPAM = ["frequent unwanted posts on home page", "can we stop the endless spamming?",
+        "every post here reads like a bot wrote it"]
+UNREADABLE = ["you write like a wall of text with no punctuation",
+              "I can't follow this at all", "learn to use paragraphs please"]
+ARGUMENT = ["Don\u2019t make assumptions dumbass",
+            "You're wasting our time and yours. Don't bother.",
+            "Stop assuming the worst, your kind never listens",
+            "You obviously have no idea what you are talking about",
+            "that is simply not true"]
+DATING = ["Tinder passport mode gives me no matches",
+          "since post-covid the apps here are dead",
+          "rent is sub $700 but nobody on tinder replies",
+          "passport mode just shows me to bots",
+          "I paid for gold and still got zero likes in Bangkok"]
+
+
+class VenueChatterTests(unittest.TestCase):
+    """Labels that ranked in pbfamily0001's top 25, rebuilt from their members' own words."""
+
+    def test_spam_and_home_page_complaints_are_venue_chatter(self):
+        self.assertEqual(evaluate_cluster(_cluster(SPAM), BOTH), ["platform_meta"])
+
+    def test_complaints_about_how_posts_are_written_are_venue_chatter(self):
+        self.assertEqual(evaluate_cluster(_cluster(UNREADABLE), BOTH), ["platform_meta"])
+
+    def test_posters_insulting_each_other_are_argument_chatter(self):
+        cluster = _cluster(ARGUMENT)
+        self.assertEqual(share_tag_share(cluster, "argument_chatter"), 0.8)
+        self.assertEqual(evaluate_cluster(cluster, BOTH), ["argument_chatter"])
+
+    def test_lol_is_a_jab_only_when_aimed_at_someone(self):
+        self.assertEqual(share_tag_share(_cluster(["lol the flight got cancelled again"]),
+                                         "argument_chatter"), 0.0)
+        self.assertEqual(share_tag_share(_cluster(["lol youre so triggered"]),
+                                         "argument_chatter"), 1.0)
+
+    def test_a_curly_apostrophe_is_still_an_apostrophe(self):
+        self.assertEqual(share_tag_share(_cluster(["You\u2019re lying and you know it"]),
+                                         "argument_chatter"), 1.0)
+
+    def test_a_dating_app_complaint_is_not_venue_chatter(self):
+        """"post-covid" is a date and "sub $700" a price; neither is the forum."""
+        self.assertEqual(evaluate_cluster(_cluster(DATING), BOTH), [])
+
+    def test_argument_chatter_is_silent_unless_enabled(self):
+        cluster = _cluster(ARGUMENT)
+        self.assertEqual(evaluate_cluster(cluster, ["platform_meta"]), [])
+        self.assertEqual(evaluate_cluster(cluster, []), [])
 
 
 class _RankStore:
