@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 import yaml  # noqa: E402
 
 from pipeline.extract import verify_run  # noqa: E402
+from pipeline.s9_rank import cluster_support, support_reasons  # noqa: E402
 from pipeline.store import Store  # noqa: E402
 
 # Marker the guard respects. Without it, the first stage to write a non-terminal status has
@@ -36,6 +37,22 @@ from pipeline.store import Store  # noqa: E402
 # and the two writers collide on one SQLite file with "database is locked".
 def _marker(run_id):
     return ROOT / "db" / ("resume-%s.maintenance" % run_id)
+
+
+def rankable_slice(store, run_id: str, min_support: dict) -> list:
+    """Pains inside every theme that clears rank's min_support, whether or not stage 7b has
+    judged it yet. The ranked slice below needs a finished rank; this one only needs clusters,
+    so it is the slice to judge BEFORE the software-fit pass and the final rank."""
+    keep = [c["id"] for c in store.get_cluster_details(run_id)
+            if not support_reasons(cluster_support(c), min_support or {})]
+    ids = []
+    for i in range(0, len(keep), 500):
+        chunk = keep[i:i + 500]
+        ids.extend(r[0] for r in store.conn.execute(
+            "SELECT p.id FROM pains p JOIN cluster_members cm ON cm.pain_id = p.id "
+            "WHERE cm.cluster_id IN (%s) AND COALESCE(p.verified, 1) != 0"
+            % ",".join("?" * len(chunk)), chunk))
+    return ids
 
 
 RANKED_SLICE = """
@@ -52,6 +69,8 @@ def main() -> int:
     ap.add_argument("run_id")
     ap.add_argument("--sample", type=int, default=0,
                     help="judge only N pains, to measure precision before paying for the rest")
+    ap.add_argument("--rankable", action="store_true",
+                    help="slice = pains in themes that clear rank.min_support (no rank needed)")
     ap.add_argument("--restore", action="store_true", help="undo: put the slice back to kept")
     ap.add_argument("--apply", action="store_true", help="write; otherwise dry run")
     args = ap.parse_args()
@@ -72,7 +91,9 @@ def main() -> int:
         print("restored %d judged pains to kept" % n)
         return 0
 
-    ids = [r[0] for r in store.conn.execute(RANKED_SLICE, (args.run_id,))]
+    ids = (rankable_slice(store, args.run_id, cfg.get("rank", {}).get("min_support"))
+           if args.rankable else
+           [r[0] for r in store.conn.execute(RANKED_SLICE, (args.run_id,))])
     if args.sample and args.sample < len(ids):
         # Spread the sample across themes. The query returns pains grouped by cluster, so
         # taking the first N would measure the precision of the top few themes only.
@@ -107,8 +128,16 @@ def main() -> int:
                 print("  judged %d/%d, %d kept (%.0fs)"
                       % (d, total, kept, time.time() - t), flush=True)
 
-        result = verify_run(store, args.run_id, cfg.get("verify", {}),
-                            cfg.get("extract", {}), progress=progress, pain_ids=ids)
+        result = {"candidates": 0, "judged": 0, "kept": 0, "rejected": 0,
+                  "by_type": {}, "failed_batches": 0}
+        for i in range(0, len(ids), 5000):
+            part = verify_run(store, args.run_id, cfg.get("verify", {}),
+                              cfg.get("extract", {}), progress=progress,
+                              pain_ids=ids[i:i + 5000])
+            for k in ("candidates", "judged", "kept", "rejected", "failed_batches"):
+                result[k] += part.get(k) or 0
+            for k, v in (part.get("by_type") or {}).items():
+                result["by_type"][k] = result["by_type"].get(k, 0) + v
         print("verify: %s" % result)
         judged = result.get("judged") or 0
         kept = result.get("kept") or 0
