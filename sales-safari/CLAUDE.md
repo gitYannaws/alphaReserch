@@ -295,7 +295,9 @@ webapp/
   `rank.drop_warnings`). An LLM cheerfully calls venue chatter software-solvable:
   `pbfamily0001` ranked "moderator abuse and unfair bans" at 8 and "subreddit toxicity" at
   11; the re-run put "frequent unwanted posts on home page" at 4. Real complaints, wrong
-  market. The tag is judged **per member, then by share** (`PLATFORM_META_MIN_SHARE`, 0.5) —
+  market. The tag is judged **per member, then by share** (`s7_filters.SHARE_TAGS`, 0.3 since
+  2026-11-10; at 0.5 "spamming issues" at share 0.29 and "writing is difficult to read" at
+  0.17 sailed through to ranks 6 and 17) —
   unlike every other tag, which fires on one hit anywhere in the theme — because this one can
   DROP, so it has to be right about the theme rather than about one post. Warnings stay
   advisory by default; `rank.drop_warnings` is the operator naming the few that disqualify.

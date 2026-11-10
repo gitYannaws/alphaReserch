@@ -189,6 +189,10 @@ extract:
   qwen:
     base_url: http://localhost:11434/v1   # Ollama default (LM Studio :1234/v1, vLLM :8000/v1)
     model: qwen2.5:14b-instruct           # ~9GB Q4, fits 16GB VRAM; `ollama list` for options
+    # The OpenAI-compat path (/v1) ignores options.num_ctx: `ollama ps` showed CONTEXT 4096
+    # with 16384 configured, and a 17k-char stage-7b prompt came back as prose. The native
+    # /api/chat path honours it. Costs ~12% CPU offload on a 12 GB GPU.
+    api_style: ollama
     api_key: ""                           # blank ok for local; Ollama ignores it
     temperature: 0
     num_ctx: 16384                        # raise Ollama's ~4096 default (qwen2.5 supports 32k);
@@ -314,7 +318,17 @@ personas:
 
 # §5 clustering
 cluster:
-  min_cluster_size: 2
+  # Measured 2026-11-10 on pbfamily0001's 72,341 embeddings (HDBSCAN + the 0.80 cohesion
+  # split, audit off). min_cluster_size 2 / min_samples default: 8,782 themes, 54.6% noise,
+  # mean 3.74, max 24, and the fake-profile pain split across fragments of at most 6 authors.
+  # 10 / 1: 1,488 themes, 60.3% noise, mean 19.3, max 111, fake-profile fragment 13 authors,
+  # DBCV 0.130 vs 0.143. 5 / 1 is the middle road (4,271 themes, 50.4% noise, max 56) but
+  # leaves the fragmentation where it was. Epsilon stays 0: it is measured in UMAP space
+  # where the median 5th-neighbour distance is 0.156, so 0.08 already builds a 1,703-member
+  # blob and 0.2 collapses the run into one. Noise is persisted as pains.cluster_noise.
+  min_cluster_size: 10
+  min_samples: 1
+  cluster_selection_epsilon: 0.0
   cluster_selection_method: leaf   # leaf = finer themes; eom = few big blobs (old default)
   # 0.55 never fired. Measured over run pbfamily0001's 8,925 themes, real cluster cohesion
   # runs 0.855 (5th pct) / 0.908 (median) / 0.954 (95th pct), so nothing was ever below the
@@ -360,6 +374,10 @@ scoring_weights:
   willingness_to_pay: 3
   reachability: 2
   recurrence_score: 3
+  # Distinct authors in the last 12 months, log-scaled (full at voices/2). Persistence rewards
+  # a theme for being old; momentum lets a young surge score. Averaged only when the source
+  # carries dates, so an undated corpus is not docked for a fact about its collector.
+  momentum: 2
 
 # §7 warning flags (advisory only; never drops by itself)
 # Advisory warning tags. Despite the name these NEVER drop a theme - they annotate it, and
@@ -369,6 +387,11 @@ scoring_weights:
 # expat/travel corpus; the rest are domain-relevant. Trim to match the niche you mine.
 hard_filters:
   - platform_meta
+  # Interpersonal forum argument ("you're wasting your time", "stop assuming", "cope") judged
+  # per member by share like platform_meta. Run pbfamily0001 ranked "frustration with
+  # baseless accusations and derailment of topics" at 11 and "wasting time and resources" at
+  # 25; both are members insulting each other, which no product addresses.
+  - argument_chatter
   - requires_soc2_hipaa
   - two_sided_marketplace
   - closed_api_dependency
@@ -402,17 +425,20 @@ rank:
   #
   # The theme keeps its row, its tag and its place in the audit view. It just stops taking a
   # slot in the ranked list. Empty this to make every warning advisory again.
-  drop_warnings: [platform_meta]
+  drop_warnings: [platform_meta, argument_chatter]
 
-# §7.5 soft filter: LLM tags each theme software-solvable (yes/partial/no) for UI color.
-# Advisory only - never drops. Batched so large runs do not exceed context windows.
+# §7.5 soft filter: the BUYER TEST. The LLM fills six evidence fields per theme (workaround,
+# cost, recurring, payer, platform_only, venue) and answers yes / partial / platform_feature /
+# no; "yes" needs at least two demand fields true, enforced again in code. Rank reads the
+# verdict through allowed_solvability and multiplies by confidence. Batched so large runs do
+# not exceed context windows.
 soft_filter:
   enabled: true
-  batch_size: 40            # upper bound on themes per call
+  batch_size: 20            # upper bound on themes per call (each theme now carries 12 spans)
   # Themes are also packed by CHARS: 40 themes x ~6 pains was ~15k tokens against a local
   # model whose default context is ~4096, so the prompt truncated and 632 of 642 themes came
   # back unclassified (silently "unknown", killing the solvable_weight signal at rank).
-  max_batch_chars: 8000
+  max_batch_chars: 20000    # needs extract.qwen.api_style: ollama (num_ctx 16384); 8000 on a 4k context
   # Skip the LLM call for themes that can never clear rank's own `min_support` below. On run
   # pbfamily0001 only 2,185 of 8,925 themes cleared it, and this pass spent 186 minutes
   # classifying all 8,925 at ~1.25s each. Restricting it to the rankable quarter costs about
