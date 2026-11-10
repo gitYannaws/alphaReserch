@@ -11,7 +11,9 @@ calls over the whole run; judging the rankable slice is a tenth of that.
     .venv-linux/bin/python scripts/rescore_stages.py <run_id>              # all steps
     .venv-linux/bin/python scripts/rescore_stages.py <run_id> --from verify  # resume
 
-Steps, in order: cluster1, verify, cluster2, softfilter, demand, rank. Every step is
+Steps, in order: cluster1, verify, cluster2, softfilter, demand, rank. cluster2 uses the rank
+gate's evidence floor (`--final-min-cluster-size`, default rank.min_support.evidence_count) as
+its min_cluster_size, because the judge withholds most of a pass-1 theme. Every step is
 idempotent: cluster_run clears its own rows, the judge skips pains that already carry a
 verdict, softfilter/demand/rank clear and rewrite. Status and stage are restored at the end
 (a maintenance run must leave the run TERMINAL, see CLAUDE.md).
@@ -42,10 +44,10 @@ def _log(msg):
     print("[%s] %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
 
 
-def _cluster(store, run_id, cfg, audit: bool):
+def _cluster(store, run_id, cfg, audit: bool, min_cluster_size: int = None):
     cc = cfg.get("cluster", {})
     return cluster_run(store, run_id,
-                       min_cluster_size=cc.get("min_cluster_size", 2),
+                       min_cluster_size=min_cluster_size or cc.get("min_cluster_size", 2),
                        min_cohesion=cc.get("min_cohesion", 0.55),
                        cluster_selection_method=cc.get("cluster_selection_method", "leaf"),
                        min_samples=cc.get("min_samples"),
@@ -113,9 +115,15 @@ def main(argv=None) -> int:
     ap.add_argument("run_id")
     ap.add_argument("--from", dest="start", choices=STEPS, default=STEPS[0])
     ap.add_argument("--to", dest="stop", choices=STEPS, default=STEPS[-1])
+    ap.add_argument("--final-min-cluster-size", type=int, default=None,
+                    help="min_cluster_size for the post-judge clustering "
+                         "(default: rank.min_support.evidence_count)")
     args = ap.parse_args(argv)
 
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    if args.final_min_cluster_size is None:
+        args.final_min_cluster_size = int(
+            (cfg.get("rank", {}).get("min_support") or {}).get("evidence_count") or 0) or None
     store = Store(cfg["db_path"])
     run = store.get_run(args.run_id)
     if not run:
@@ -134,7 +142,11 @@ def main(argv=None) -> int:
             elif step == "verify":
                 r = _verify(store, args.run_id, cfg)
             elif step == "cluster2":
-                r = _cluster(store, args.run_id, cfg, audit=True)
+                # The judge withholds most members of a pass-1 theme (measured 8% kept on the
+                # ranked slice), so the survivors re-form themes at the rank gate's own evidence
+                # floor rather than the pass-1 size that decided who was worth judging.
+                r = _cluster(store, args.run_id, cfg, audit=True,
+                             min_cluster_size=args.final_min_cluster_size)
             elif step == "softfilter":
                 r = _softfilter(store, args.run_id, cfg)
             elif step == "demand":

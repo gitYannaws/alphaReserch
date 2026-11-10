@@ -195,7 +195,10 @@ extract:
     api_style: ollama
     api_key: ""                           # blank ok for local; Ollama ignores it
     temperature: 0
-    num_ctx: 16384                        # raise Ollama's ~4096 default (qwen2.5 supports 32k);
+    # 8192, not 16384: at 16k the KV cache pushes the 14B past a 12 GB GPU (12% of layers on
+    # the CPU) and a 10-pain verify batch took ~80 s instead of ~11 s. 8k fits entirely and
+    # still holds a 12k-char stage-7b batch; the semantic audit samples its members.
+    num_ctx: 8192                         # raise Ollama's ~4096 default (qwen2.5 supports 32k);
                                           # lets bigger batches fit. Sent as options.num_ctx;
                                           # ignored by servers that don't support it (batching
                                           # still guards truncation regardless).
@@ -302,7 +305,7 @@ verify:
   # usage-limit 429, so precision does not depend on a single provider being available.
   providers: [qwen]
   model: ""                 # unused while providers is local-only
-  batch_size: 10            # candidates per judge call
+  batch_size: 16            # candidates per judge call (~14k chars, fits the 8k context; measured 10 at ~11 s, 16 cuts calls by a third)
   # Keep only a speaker's concrete product friction, explicit unmet wish, or own cost pain.
   # Social grievances remain stored and auditable, but do not create themes or opportunities.
   keep_types: [product_friction, wish, cost_complaint]
@@ -438,7 +441,7 @@ soft_filter:
   # Themes are also packed by CHARS: 40 themes x ~6 pains was ~15k tokens against a local
   # model whose default context is ~4096, so the prompt truncated and 632 of 642 themes came
   # back unclassified (silently "unknown", killing the solvable_weight signal at rank).
-  max_batch_chars: 20000    # needs extract.qwen.api_style: ollama (num_ctx 16384); 8000 on a 4k context
+  max_batch_chars: 12000    # needs extract.qwen.api_style: ollama (num_ctx 8192); 8000 on a 4k context
   # Skip the LLM call for themes that can never clear rank's own `min_support` below. On run
   # pbfamily0001 only 2,185 of 8,925 themes cleared it, and this pass spent 186 minutes
   # classifying all 8,925 at ~1.25s each. Restricting it to the rankable quarter costs about

@@ -15,6 +15,7 @@ from .extract import _call_extractor, _parse_json_array
 
 _EPS = 1e-9
 DEFAULT_AUDIT_MIN_CLUSTER_SIZE = 5
+DEFAULT_AUDIT_SAMPLE_SIZE = 40
 # The audit prompt shows its output shape with a literal example label. A model that has
 # nothing to say sometimes echoes that example back instead of naming the theme, and the
 # name was stored verbatim: run pbfamily0001's largest cluster (580 members, 493 authors)
@@ -177,7 +178,8 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
                 audit_min_cluster_size: int = DEFAULT_AUDIT_MIN_CLUSTER_SIZE,
                 extract_cfg: dict = None,
                 progress=None,
-                semantic_label_only: bool = False) -> dict:
+                semantic_label_only: bool = False,
+                audit_sample_size: int = DEFAULT_AUDIT_SAMPLE_SIZE) -> dict:
     """Cluster verified pain candidates; the semantic audit may label only or retain
     only coherent buyer-problem groups, depending on `semantic_label_only`."""
     rows = store.get_embeddings(run_id)
@@ -235,6 +237,13 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
         if semantic_refine and extract_cfg and len(part) >= max(min_cluster_size, audit_min_cluster_size):
             audited += 1
             pids = [str(ids[i]) for i in part]
+            if semantic_label_only and len(part) > audit_sample_size:
+                # Label-only needs a NAME, not a membership verdict, and the members nearest
+                # the centroid name a theme as well as all of them. A 111-member theme at 360
+                # chars each overflows an 8k context and comes back unparseable, which would
+                # name it from a raw quote instead.
+                central = part[np.argsort(-_centroid_sims(X[part]))][:audit_sample_size]
+                pids = [str(ids[i]) for i in central]
             refined = _semantic_groups(store, pids, extract_cfg, min_cluster_size)
             if refined is not None:
                 if semantic_label_only:

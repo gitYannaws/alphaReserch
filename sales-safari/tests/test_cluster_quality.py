@@ -123,3 +123,57 @@ class ClusterRecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditSampleTests(unittest.TestCase):
+    """Label-only audits name a theme; they do not need every member. A 111-member theme at
+    360 chars each overflows an 8k-token local context and comes back unparseable."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = Store(os.path.join(self.tmp, "t.sqlite"))
+        rng = np.random.default_rng(1)
+        # 14 points in two blobs of 7: under 15, so HDBSCAN sees the raw vectors and no UMAP
+        # randomness; two blobs, because HDBSCAN calls a lone blob noise by default.
+        for j in range(14):
+            text = f"member complaint {j}"
+            self.store.insert_pain(RUN, {"document_id": f"d{j}", "verbatim_span": text,
+                                         "complaint": text, "author_hash": f"a{j}"})
+            pid = self.store.conn.execute(
+                "SELECT id FROM pains WHERE document_id=?", (f"d{j}",)).fetchone()[0]
+            vec = _axis(j % 2) + rng.normal(0, 0.05, DIM)
+            self.store.save_embedding(RUN, pid, np.asarray(vec, dtype="float32").tobytes())
+
+    def tearDown(self):
+        self.store.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_label_only_audit_sees_at_most_the_sample(self):
+        import json
+        import pipeline.cluster as cluster_mod
+        seen = []
+
+        def fake_extractor(prompt, extract_cfg):
+            payload = json.loads(prompt.split("PAINS:\n", 1)[1])
+            seen.append(len(payload))
+            ids = [p["id"] for p in payload[:5]]
+            return json.dumps([{"label": "one named theme", "pain_ids": ids}]), "stub"
+
+        real = cluster_mod._call_extractor
+        cluster_mod._call_extractor = fake_extractor
+        try:
+            result = cluster_run(self.store, RUN, min_cluster_size=5, min_cohesion=0.0,
+                                 semantic_refine=True, semantic_label_only=True,
+                                 audit_min_cluster_size=5, audit_sample_size=6,
+                                 extract_cfg={"providers": ["stub"]})
+        finally:
+            cluster_mod._call_extractor = real
+        # Both blobs have 7 members, so every audit prompt must have been cut to the
+        # 6-member sample (the sample stays >= min_cluster_size so a group can still name it).
+        self.assertEqual(result["semantic_audited"], 2)
+        self.assertEqual(seen, [6, 6], seen)
+        rows = self.store.conn.execute(
+            "SELECT label, size FROM clusters WHERE run_id=?", (RUN,)).fetchall()
+        self.assertEqual({label for label, _ in rows}, {"one named theme"})
+        self.assertEqual(sum(size for _, size in rows), 14,
+                         "label-only must keep every member, sampled or not")
