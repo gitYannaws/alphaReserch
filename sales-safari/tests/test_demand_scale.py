@@ -36,7 +36,7 @@ WEIGHTS = {"pain_intensity": 3, "frequency": 3, "willingness_to_pay": 3,
 NOW = datetime(2026, 8, 18, tzinfo=timezone.utc)
 
 
-def _cluster(authors=5, pains=None, threads=1, days_ago=None, score=None):
+def _cluster(authors=5, pains=None, threads=1, days_ago=None, score=None, now=NOW):
     """A theme with `authors` distinct authors, one pain each unless `pains` says otherwise.
 
     Pain i is written by author i % authors and dated `days_ago[i % len(days_ago)]`."""
@@ -57,7 +57,7 @@ def _cluster(authors=5, pains=None, threads=1, days_ago=None, score=None):
             "thread_url": "https://example.test/t%d" % (i % threads),
             "source_granularity": "post",
             "score": score,
-            "created_at": (NOW - timedelta(days=days_ago[i % len(days_ago)])).isoformat(),
+            "created_at": (now - timedelta(days=days_ago[i % len(days_ago)])).isoformat(),
         } for i in range(n)],
     }
 
@@ -169,6 +169,14 @@ class MomentumTests(unittest.TestCase):
         self.assertGreater(surge["demand_score"], trickle["demand_score"],
                            "the two themes differ only in when they were raised")
         self.assertGreater(surge["momentum"], trickle["momentum"])
+
+    def test_momentum_reads_the_corpus_clock_not_the_wall_clock(self):
+        """NOW above is 84 days before the day this was written, so a wall-clock momentum
+        passed every other test. A corpus that ended in 2020 still has its own recent voices."""
+        cluster = _cluster(authors=6, days_ago=[10], now=datetime(2020, 3, 1, tzinfo=timezone.utc))
+        result = score_cluster(cluster, WEIGHTS, corpus_latest_date([cluster]))
+        self.assertEqual(result["scoring_evidence"]["momentum"]["recent_authors"], 6)
+        self.assertGreater(result["momentum"], 0.0)
 
     def test_momentum_counts_people_not_posts(self):
         one_voice = self._score(authors=1, pains=8, days_ago=[10])

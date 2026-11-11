@@ -14,6 +14,7 @@ graded by tense (money spent beats money imagined), and intensity by stated cons
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 
 from pipeline.s6_demand import (CONSEQUENCE_TERMS, INTENSITY_TERMS, REACHABILITY_TERMS,
                                 WTP_STRONG_TERMS, WTP_WEAK_TERMS, _term_hits, score_cluster)
@@ -24,10 +25,11 @@ SILENT = "the night market closes early on sundays"
 
 
 def _theme(texts, authors=None, persona=""):
-    """One pain per text. With no `authors`, author_hash is empty and the pain id stands in."""
+    """One pain per text. With no `authors`, author_hash is empty. `distinct_authors` counts
+    real hashes only, as stage 5 stores it."""
     return {
         "id": "c1", "label": "t", "size": len(texts),
-        "distinct_authors": len(set(authors)) if authors else len(texts),
+        "distinct_authors": len({a for a in authors or [] if a}),
         "pains": [{
             "id": "p%d" % i, "author_hash": authors[i] if authors else "",
             "complaint": "", "workflow_pain": "", "workaround": "", "wish": "",
@@ -88,12 +90,61 @@ class WtpCountsAuthorsTests(unittest.TestCase):
         ev = _score(_theme(texts))["scoring_evidence"]["willingness_to_pay"]
         strong = ev["wtp_strong"]
         self.assertEqual(strong["authors_with_signal"], 6)
-        self.assertEqual(strong["distinct_authors"], 10, "an empty author_hash falls back to the pain id")
+        self.assertEqual(strong["distinct_authors"], 10,
+                         "a theme with no author hash at all counts each pain once")
         self.assertEqual(strong["share"], 0.6)
         self.assertIn("$30", strong["signals"])
         self.assertIn("i pay", strong["signals"])
         self.assertEqual([q["quote"] for q in strong["quotes"]], [texts[0]] * 3)
         self.assertEqual(ev["wtp_weak"]["authors_with_signal"], 0)
+
+    def test_not_worth_is_strong_only_with_a_money_object(self):
+        """On pbfamily0001, 68 of 81 "not worth" pains had no money word near them: "its not
+        worth it" is a remark about dating, not a price someone weighed."""
+        def strong(text):
+            ev = _score(_theme([text] * 3))["scoring_evidence"]["willingness_to_pay"]
+            return ev["wtp_strong"]["authors_with_signal"]
+
+        for text in ("i get rejected all the time so its not worth it",
+                     "eastern european women are not worth the hassle"):
+            with self.subTest(text=text):
+                self.assertEqual(strong(text), 0)
+        for text in ("premium is not worth the money", "not worth the subscription at all",
+                     "not worth the price", "not worth the cost", "not worth the fee",
+                     "i would call it worth paying for"):
+            with self.subTest(text=text):
+                self.assertEqual(strong(text), 3)
+
+
+class MomentumCountsTheSamePeopleTests(unittest.TestCase):
+    """Stage 5 counts only real author hashes. Momentum counted each unauthored pain as one
+    more person: 4 authors and 6 unauthored pains scored 9.21 against 6.18 for the 4 alone."""
+
+    LATEST = datetime(2026, 8, 18, tzinfo=timezone.utc)
+
+    def _dated(self, texts, authors=None):
+        theme = _theme(texts, authors=authors)
+        for pain in theme["pains"]:
+            pain["created_at"] = "2026-08-01T00:00:00+00:00"
+        return theme
+
+    def test_unauthored_pains_are_not_extra_people(self):
+        mixed = self._dated([SILENT] * 10, authors=list("abcd") + [""] * 6)
+        alone = self._dated([SILENT] * 4, authors=list("abcd"))
+        scored = score_cluster(mixed, WEIGHTS, self.LATEST)
+        self.assertEqual(scored["scoring_evidence"]["momentum"]["recent_authors"],
+                         mixed["distinct_authors"], "momentum and frequency count the same people")
+        self.assertEqual(scored["momentum"], score_cluster(alone, WEIGHTS, self.LATEST)["momentum"])
+
+    def test_a_theme_with_no_author_at_all_counts_pains_and_says_so(self):
+        scored = score_cluster(self._dated([SILENT] * 6), WEIGHTS, self.LATEST)
+        ev = scored["scoring_evidence"]["momentum"]
+        self.assertEqual((ev["method"], ev["recent_authors"]), ("no_authors", 6))
+        parts = {k: scored[k] for k in (*WEIGHTS, "momentum")}
+        weights = {**WEIGHTS, "momentum": 2}
+        self.assertEqual(scored["demand_score"], round(
+            sum(parts[k] * weights[k] for k in parts) / sum(weights.values()), 2),
+            "a dated theme keeps momentum in its demand average")
 
 
 class IntensityByConsequenceTests(unittest.TestCase):

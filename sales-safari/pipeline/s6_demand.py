@@ -53,9 +53,13 @@ CONSEQUENCE_TERMS = {
 # "Expensive dates" once reached rank 1). "scam" is in neither tier: it is a fraud complaint.
 WTP_STRONG_TERMS = {
     "i paid", "i pay", "paying for", "paid for", "i subscribe", "my subscription",
-    "switched from", "hired a", "bought a", "worth paying", "not worth", "premium",
+    "switched from", "hired a", "bought a", "worth paying", "premium",
     "paywall", "free trial",
 }
+# "not worth" counts only with a money object. Bare, it lifted 65 rankable themes' WTP on
+# pbfamily0001, and none of its 81 hits named money: "not worth it", "the effort", "the risk".
+WTP_NOT_WORTH_MONEY = (r"(?<![a-z0-9])not\s+worth\s+the\s+"
+                       r"(?:(?:money|price|cost|fees?|subscription)(?![a-z0-9])|\$\s?\d)")
 # A period needs a number in front of it: bare "a month" in the ranked themes is "once a
 # month" and "in about a month", not a price.
 WTP_AMOUNT_PATTERNS = (
@@ -134,7 +138,8 @@ def _term_score(text: str, terms: set, base: float = 2.0) -> tuple[float, list]:
 # the concatenated theme text let one member's "premium" light the whole theme.
 EVIDENCE_CLASSES = {
     cls: tuple(re.compile(p) for p in patterns) for cls, patterns in {
-        "wtp_strong": [_term_regex(t) for t in WTP_STRONG_TERMS] + list(WTP_AMOUNT_PATTERNS),
+        "wtp_strong": ([_term_regex(t) for t in WTP_STRONG_TERMS] + list(WTP_AMOUNT_PATTERNS)
+                       + [WTP_NOT_WORTH_MONEY]),
         "wtp_weak": [_term_regex(t) for t in WTP_WEAK_TERMS],
         "intensity_consequence": [_term_regex(t) for t in CONSEQUENCE_TERMS],
         "intensity_generic": [_term_regex(t) for t in INTENSITY_TERMS],
@@ -323,7 +328,8 @@ def _momentum(cluster: dict, corpus_latest, full_at: dict) -> tuple[float, dict]
 
     Persistence rewards age: a pain first seen last year topped out near 4-5 however many
     people raised it, so an emerging pain could not reach the top. Momentum counts the recent
-    voices on their own curve, full at half the frequency anchor.
+    voices on their own curve, full at half the frequency anchor. Only real author hashes
+    count, as in stage 5's distinct_authors; a theme with none counts its pains instead.
     """
     full = full_at["voices"] / 2
     dated = [(p, d) for p in cluster["pains"] if (d := _parse_date(p.get("created_at")))]
@@ -331,9 +337,11 @@ def _momentum(cluster: dict, corpus_latest, full_at: dict) -> tuple[float, dict]
         return 0.0, {"method": "undated", "recent_authors": 0, "dated_pains": len(dated),
                      "note": "no complaint dates, so no momentum can be measured"}
     cutoff = corpus_latest - timedelta(days=365)
-    recent = {_author_key(p) for p, d in dated if d >= cutoff}
+    authored = any(p.get("author_hash") for p in cluster["pains"])
+    recent = {p.get("author_hash") if authored else p.get("id")
+              for p, d in dated if d >= cutoff} - {None, ""}
     return round(_log_scale(len(recent), full), 2), {
-        "method": "dates",
+        "method": "dates" if authored else "no_authors",
         "recent_authors": len(recent),
         "full_at_authors": full,
         "dated_pains": len(dated),
@@ -400,7 +408,7 @@ def score_cluster(cluster: dict, weights: dict, corpus_latest=None,
         # would dock an undated theme 2/16 of its demand for a fact about the collector, not
         # the pain, so the term is averaged only when the dates exist.
         "demand_score": _weighted_score(
-            parts if momentum_evidence.get("method") == "dates"
+            parts if momentum_evidence.get("method") != "undated"
             else {k: v for k, v in parts.items() if k != "momentum"},
             {"momentum": 2, **weights}),
         "evidence_count": evidence_count,
