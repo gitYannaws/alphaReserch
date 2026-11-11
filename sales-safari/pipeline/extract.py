@@ -12,7 +12,30 @@ import tempfile
 import time
 from pathlib import Path
 
-PROMPT_VERSION = "extract-v3"
+PROMPT_VERSION = "extract-v4"
+
+# The classifier's job is to TAG type; a separate config policy (verify.keep_types) decides
+# which types survive. That keeps the contested "is a social gripe a pain?" call a reversible
+# knob, not a hard-coded bar. These are the whole allowed set, shared by both stages: 3a tags
+# with these short definitions, 3b judges with its own longer ones.
+PAIN_TYPE_DEFINITIONS = {
+    "product_friction": "the speaker's OWN friction doing a task: wasted time, a manual "
+                        "workaround, a tool that fails them.",
+    "wish": "the speaker wants a tool, feature, or solution that does not exist.",
+    "cost_complaint": "the speaker's OWN money pain from a specific product, service, or "
+                      "activity.",
+    "social_complaint": "the speaker's OWN frustration with people, dating, places, or society.",
+    "advice_opinion": "advice to others, debate, opinion, or praise; no pain of the speaker's own.",
+    "off_topic": "joke, snark, thanks, chit-chat, or a plain question; no pain voiced.",
+}
+PAIN_TYPES = tuple(PAIN_TYPE_DEFINITIONS)
+
+
+def normalize_pain_type(value) -> str:
+    """A model's type tag as a member of PAIN_TYPES, or "" when it is not one."""
+    text = str(value or "").strip().lower()
+    return text if text in PAIN_TYPES else ""
+
 
 PROMPT_HEADER = """You extract customer PAIN signals from forum posts for market research.
 
@@ -40,9 +63,16 @@ RULES:
   non-empty summary. "workaround" is supporting context, not enough by itself.
   Never use placeholders like "1", "n/a", or ".".
 - Use "" for fields that don't apply. verbatim_span is always required.
+- "pain_type" = the ONE type below that fits the item best. The tag NEVER decides whether
+  you output an item: decide inclusion exactly as the rules above say, then tag it. If an
+  item you include reads as advice, opinion, or a joke, tag it advice_opinion or off_topic;
+  do NOT drop it. When unsure of the type, pick the closest one.
+
+PAIN TYPES:
+""" + "\n".join(f"- {name}: {meaning}" for name, meaning in PAIN_TYPE_DEFINITIONS.items()) + """
 
 Return ONLY a JSON array, no prose, no code fences. Each item:
-{"post_id","complaint","workflow_pain","workaround","wish","persona","verbatim_span"}
+{"post_id","complaint","workflow_pain","workaround","wish","persona","verbatim_span","pain_type"}
 
 POSTS:
 """
@@ -503,7 +533,7 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
     # evidence. Deterministic and free, unlike the stage-3b judge.
     min_span_chars = int(ecfg.get("min_span_chars", 25) or 0)
     kept, dropped, dropped_short_span, calls, failed_batches = 0, 0, 0, 0, []
-    provider_counts = {}
+    provider_counts, by_extract_type = {}, {}
     done, bi = 0, 0
     for batch in _pack_batches(docs, batch_size, max_batch_chars, max_doc_chars):
         if should_stop:
@@ -556,6 +586,7 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
                 continue
             if mode == "union":
                 accepted_by_doc.setdefault(doc["id"], []).append(bounds)
+            extract_type = normalize_pain_type(it.get("pain_type"))
             if store.insert_pain(run_id, {
                 "document_id": doc["id"],
                 "source_id": doc["source_url"],
@@ -569,8 +600,11 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
                 "verbatim_span": span,
                 "span_start": bounds[0],
                 "span_end": bounds[1],
+                "extract_type": extract_type or None,
             }):
                 kept += 1
+                if extract_type:
+                    by_extract_type[extract_type] = by_extract_type.get(extract_type, 0) + 1
         # Checkpoint only a batch that got through the model. A failed batch stays
         # unmarked above (it `continue`s before here) so the next pass retries it.
         store.mark_docs_extracted(run_id, [d["id"] for d, _ in batch])
@@ -582,6 +616,7 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
     if docs and calls == 0 and failed_batches:
         raise RuntimeError(f"pain extraction failed for all batches: {failed_batches[-1]}")
 
+    typed = sum(by_extract_type.values())
     return {
         "docs": total_docs,
         "extracted_now": len(docs),
@@ -592,24 +627,14 @@ def extract_run(store, run_id: str, batch_size: int = 6, limit: int = None,
         "dropped_short_span": dropped_short_span,
         "failed_batches": len(failed_batches),
         "providers": provider_counts,
+        "typed": typed,
+        "untyped": kept - typed,
+        "by_extract_type": by_extract_type,
     }
 
 
 # ---- stage 3b: verify -----------------------------------------------------
 VERIFY_PROMPT_VERSION = "verify-v3"
-
-# The classifier's job is to TAG type; a separate config policy (verify.keep_types) decides
-# which types survive. That keeps the contested "is a social gripe a pain?" call a reversible
-# knob, not a hard-coded bar. Types below are the whole allowed set.
-PAIN_TYPES = (
-    "product_friction",   # the speaker's OWN workflow friction, time cost, manual workaround,
-                          #   a tool that fails them. Product-shaped.
-    "wish",               # explicit desire for a tool/solution that does not exist yet.
-    "cost_complaint",     # something costs too much / money pain. Product-adjacent, contested.
-    "social_complaint",   # gripe about people, places, dating, society - not software-solvable.
-    "advice_opinion",     # advice to others, debate, opinion, praise, generic take - no own pain.
-    "off_topic",          # joke, snark, thanks, chit-chat, question with no pain.
-)
 
 VERIFY_PROMPT_HEADER = """You sort forum quotes into GENUINE PAIN vs NOISE for market research.
 
@@ -714,8 +739,8 @@ def classify_candidates(candidates: list, verify_cfg: dict = None, extract_cfg: 
             continue
         for c in batch:
             v = verdicts.get(c["id"])
-            ptype = (v.get("pain_type") if v else "").strip().lower()
-            if ptype not in PAIN_TYPES:
+            ptype = normalize_pain_type(v.get("pain_type") if v else "")
+            if not ptype:
                 out[c["id"]] = {
                     "pain_type": "unjudged",
                     "verified": None if require_verdict else 1,

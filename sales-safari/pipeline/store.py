@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS pains(
   verified INTEGER,
   pain_type TEXT,
   verify_reason TEXT,
+  extract_type TEXT,
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pains_run ON pains(run_id);
@@ -441,6 +442,8 @@ def _migrate(conn):
     _ensure_column(conn, "pains", "verified", "verified INTEGER")
     _ensure_column(conn, "pains", "pain_type", "pain_type TEXT")
     _ensure_column(conn, "pains", "verify_reason", "verify_reason TEXT")
+    # Stage 3a's provisional type tag, kept apart from pain_type so it never overrides 3b.
+    _ensure_column(conn, "pains", "extract_type", "extract_type TEXT")
     # Stage 7 (regex warning tags) merged into 7b: one advisory pass, one row per theme.
     _ensure_column(conn, "soft_filters", "warnings", "warnings TEXT")
     _ensure_column(conn, "soft_filters", "evidence", "evidence TEXT")
@@ -1275,14 +1278,26 @@ class Store:
         self.conn.execute(
             "INSERT INTO pains(id,run_id,document_id,source_id,author_hash,complaint,"
             "workflow_pain,workaround,wish,persona,verbatim_span,span_start,span_end,"
-            "source_permalink,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "source_permalink,extract_type,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pid, run_id, p["document_id"], p.get("source_id"), p.get("author_hash"),
              p.get("complaint", ""), p.get("workflow_pain", ""), p.get("workaround", ""),
              p.get("wish", ""), p.get("persona", ""), p["verbatim_span"],
              p.get("span_start"), p.get("span_end"), p.get("source_permalink"),
-             datetime.now(timezone.utc).isoformat()))
+             p.get("extract_type") or None, datetime.now(timezone.utc).isoformat()))
         self.conn.commit()
         return True
+
+    def extract_type_vs_verdict(self, run_id: str) -> list[tuple[str, str | None, int]]:
+        """(extract_type, pain_type, count) over the run's pains that carry a stage-3a tag.
+        pain_type is None for a pain stage 3b has not judged yet."""
+        # A read-only Store skips migration, so a database no writer has opened since this
+        # column was added does not have it yet; no column means no tagged pain.
+        if "extract_type" not in _columns(self.conn, "pains"):
+            return []
+        return self.conn.execute(
+            "SELECT extract_type, pain_type, COUNT(*) FROM pains "
+            "WHERE run_id=? AND extract_type IS NOT NULL "
+            "GROUP BY extract_type, pain_type", (run_id,)).fetchall()
 
     def count_pains(self, run_id: str) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM pains WHERE run_id=?", (run_id,)).fetchone()[0]

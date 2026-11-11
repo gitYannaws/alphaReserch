@@ -112,7 +112,7 @@ webapp/
   the run from the DB alone
 - `documents(id, run_id, source_type, source_granularity, source_url, permalink, title, raw_markdown, author_hash, thread_url, created_at, fetched_at)`
 - `run_documents(run_id, document_id, collected_at)` links canonical source docs to each run
-- `pains(id, run_id, document_id, source_id, author_hash, complaint, workflow_pain, workaround, wish, persona, verbatim_span, span_start, span_end, source_permalink, created_at, verified, pain_type, verify_reason)` — stage 3b writes the last three; `verified=0` is withheld by `get_pains` (NULL = never verified, kept)
+- `pains(id, run_id, document_id, source_id, author_hash, complaint, workflow_pain, workaround, wish, persona, verbatim_span, span_start, span_end, source_permalink, created_at, verified, pain_type, verify_reason, extract_type)` — stage 3b writes `verified`, `pain_type`, `verify_reason`; `verified=0` is withheld by `get_pains` (NULL = never verified, kept). `extract_type` is stage 3a's provisional type tag (NULL = none or invalid); it never overrides stage 3b, and `scripts/compare_extract_type.py` measures it against 3b
 - `embeddings(pain_id, run_id, vec BLOB)`
 - `clusters(id, run_id, label, size, distinct_authors)` + `cluster_members(cluster_id, pain_id)`
 - `demand_scores(cluster_id, run_id, pain_intensity, frequency, willingness_to_pay, reachability, recurrence_score, persistence_score, demand_score, evidence_count, distinct_authors, scoring_evidence)` — persistence is a rank multiplier, not in the demand average
