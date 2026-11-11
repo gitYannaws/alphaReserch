@@ -1404,6 +1404,21 @@ class Store:
         self.conn.execute("UPDATE pains SET cluster_noise=NULL WHERE run_id=?", (run_id,))
         self.conn.commit()
 
+    def clear_cluster_dependents(self, run_id: str) -> dict:
+        """Delete the run's rows keyed to a cluster id, outside the clusters themselves.
+
+        A re-cluster reuses the ids `<run>-<n>`, so a ranking, score or idea of an old theme
+        resolves to an unrelated new one. Returns rows deleted per table."""
+        counts = {"competitor_reviews": self.conn.execute(
+            "DELETE FROM competitor_reviews WHERE competitor_id IN "
+            "(SELECT id FROM competitors WHERE run_id=?)", (run_id,)).rowcount}
+        for table in ("rankings", "demand_scores", "soft_filters", "filter_results",
+                      "competitive_intel", "competitors", "ideas", "idea_briefs"):
+            counts[table] = self.conn.execute(
+                f"DELETE FROM {table} WHERE run_id=?", (run_id,)).rowcount
+        self.conn.commit()
+        return counts
+
     def save_cluster(self, cid: str, run_id: str, label: str, size: int, distinct_authors: int, pain_ids,
                      cohesion: float = None, audit_label_source: str = None):
         self.conn.execute("INSERT OR REPLACE INTO clusters(id,run_id,label,size,distinct_authors,"

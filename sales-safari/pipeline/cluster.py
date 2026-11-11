@@ -179,10 +179,15 @@ def cluster_run(store, run_id: str, min_cluster_size: int = 2,
                 extract_cfg: dict = None,
                 progress=None,
                 semantic_label_only: bool = False,
-                audit_sample_size: int = DEFAULT_AUDIT_SAMPLE_SIZE) -> dict:
+                audit_sample_size: int = DEFAULT_AUDIT_SAMPLE_SIZE,
+                only_pain_ids=None) -> dict:
     """Cluster verified pain candidates; the semantic audit may label only or retain
-    only coherent buyer-problem groups, depending on `semantic_label_only`."""
+    only coherent buyer-problem groups, depending on `semantic_label_only`.
+    `only_pain_ids`, when given, limits the input to those pains."""
     rows = store.get_embeddings(run_id)
+    if only_pain_ids is not None:
+        only = set(only_pain_ids)
+        rows = [r for r in rows if r[0] in only]
     if len(rows) < min_cluster_size:
         store.clear_clusters(run_id)
         store.set_cluster_noise([r[0] for r in rows], [])

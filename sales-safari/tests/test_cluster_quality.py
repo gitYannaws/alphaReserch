@@ -121,9 +121,6 @@ class ClusterRecordTests(unittest.TestCase):
         self.assertEqual(labels, [f"blob {k} central complaint" for k in range(3)])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class AuditSampleTests(unittest.TestCase):
     """Label-only audits name a theme; they do not need every member. A 111-member theme at
@@ -177,3 +174,7 @@ class AuditSampleTests(unittest.TestCase):
         self.assertEqual({label for label, _ in rows}, {"one named theme"})
         self.assertEqual(sum(size for _, size in rows), 14,
                          "label-only must keep every member, sampled or not")
+
+
+if __name__ == "__main__":
+    unittest.main()
