@@ -298,9 +298,30 @@ CREATE TABLE IF NOT EXISTS ideas(
   title TEXT,
   pitch TEXT,
   evidence_permalink TEXT,
-  created_at TEXT
+  created_at TEXT,
+  regenerated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ideas_run ON ideas(run_id);
+
+-- The owner's yay/nay on a theme or idea: the only human ground truth in the project.
+-- Cluster ids are reused when a run is re-clustered and a regenerated idea keeps its id,
+-- so each vote snapshots what was judged (label, members, title, rank). The snapshot is
+-- what a regression maps onto a later ranking; the ids are only where it was cast.
+CREATE TABLE IF NOT EXISTS feedback(
+  id INTEGER PRIMARY KEY,
+  run_id TEXT,
+  kind TEXT CHECK(kind IN ('theme','idea')),
+  cluster_id TEXT,
+  idea_id TEXT,
+  verdict TEXT CHECK(verdict IN ('yay','nay')),
+  note TEXT,
+  label TEXT,
+  title TEXT,
+  member_pain_ids TEXT,      -- JSON sorted [pain_id]
+  rank_at_vote INTEGER,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_run ON feedback(run_id);
 
 -- Stage 10b: the built-out brief for an idea, written AFTER its competitors and their
 -- low-star reviews are known, so the wedge is grounded in a named incumbent's actual
@@ -434,6 +455,7 @@ def _migrate(conn):
     _ensure_column(conn, "runs", "last_topic_found_at", "last_topic_found_at TEXT")
     _ensure_column(conn, "runs", "updated_at", "updated_at TEXT")
     _ensure_column(conn, "corpora", "backfill_completed_at", "backfill_completed_at TEXT")
+    _ensure_column(conn, "ideas", "regenerated_at", "regenerated_at TEXT")
 
     # --- one-time data repairs, gated on user_version ---
     # Everything above is idempotent and costs ~4ms, so it re-runs on every connect and
@@ -460,8 +482,21 @@ def _migrate(conn):
     conn.commit()
 
 
+# kind -> (key column, column that tells whether the subject under that key is still the
+# one voted on). A theme is the same theme while its members are; an idea while its title is.
+FEEDBACK_SUBJECT = {"theme": ("cluster_id", "member_pain_ids"), "idea": ("idea_id", "title")}
+_FEEDBACK_COLS = ("id", "kind", "cluster_id", "idea_id", "verdict", "note", "label", "title",
+                  "member_pain_ids", "rank_at_vote", "created_at")
+
+
 class Store:
-    def __init__(self, path: str = "db/safari.sqlite"):
+    def __init__(self, path: str = "db/safari.sqlite", readonly: bool = False):
+        if readonly:
+            # For bench scripts reading a DB a live run may be writing: no migration, no
+            # journal-mode switch, and SQLite itself refuses any write.
+            self.conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True,
+                                        timeout=30)
+            return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path, timeout=30)
         self.conn.execute("PRAGMA busy_timeout=30000")
@@ -1407,6 +1442,15 @@ class Store:
             "ORDER BY distinct_authors DESC, size DESC", (run_id,)).fetchall()
         return [{"label": r[0], "size": r[1], "distinct_authors": r[2]} for r in rows]
 
+    def get_theme_members(self, run_id: str) -> dict:
+        """{cluster_id: {pain_id}} for every theme of the run, without the pain text."""
+        out = {}
+        for cid, pid in self.conn.execute(
+                "SELECT cm.cluster_id,cm.pain_id FROM cluster_members cm "
+                "JOIN clusters c ON c.id=cm.cluster_id WHERE c.run_id=?", (run_id,)):
+            out.setdefault(cid, set()).add(pid)
+        return out
+
     def get_cluster_details(self, run_id: str, cluster_ids=None):
         """Every theme with its member pains, or only `cluster_ids` when given.
 
@@ -1952,7 +1996,7 @@ class Store:
 
     def get_ideas(self, run_id: str):
         rows = self.conn.execute(
-            "SELECT id,cluster_id,title,pitch,evidence_permalink "
+            "SELECT id,cluster_id,title,pitch,evidence_permalink,regenerated_at "
             "FROM ideas WHERE run_id=? ORDER BY created_at",
             (run_id,)).fetchall()
         return [{
@@ -1961,7 +2005,22 @@ class Store:
             "title": r[2],
             "pitch": r[3],
             "evidence_permalink": r[4],
+            "regenerated_at": r[5],
         } for r in rows]
+
+    def replace_idea(self, run_id: str, idea_id: str, title: str, pitch: str,
+                     evidence_permalink: str):
+        """Swap a re-drafted idea into its row, keeping the id, and drop its brief: the
+        brief argued for the old idea, so showing it under the new title would be false."""
+        from datetime import datetime, timezone
+        self.conn.execute(
+            "UPDATE ideas SET title=?,pitch=?,evidence_permalink=?,regenerated_at=? "
+            "WHERE run_id=? AND id=?",
+            (title, pitch, evidence_permalink, datetime.now(timezone.utc).isoformat(),
+             run_id, idea_id))
+        self.conn.execute("DELETE FROM idea_briefs WHERE run_id=? AND idea_id=?",
+                          (run_id, idea_id))
+        self.conn.commit()
 
     # ---- stage 10b: built-out idea briefs ----
     def clear_briefs(self, run_id: str):
@@ -2002,6 +2061,83 @@ class Store:
             "has_review_evidence": bool(r[8]),
             "review_quote_count": r[9] or 0,
         } for r in rows]
+
+    # ---- owner feedback: yay/nay votes ----
+    def _feedback_snapshot(self, run_id: str, kind: str, key: str):
+        """A vote row on theme `key` (cluster id) or idea `key`, minus the verdict, read from
+        this run's own tables so no caller can supply the label, members or rank. None when
+        the run has no such theme or idea."""
+        cluster_id, title = key, None
+        if kind == "idea":
+            row = self.conn.execute("SELECT cluster_id,title FROM ideas WHERE run_id=? AND id=?",
+                                    (run_id, key)).fetchone()
+            if not row:
+                return None
+            cluster_id, title = row
+        theme = self.conn.execute("SELECT label FROM clusters WHERE run_id=? AND id=?",
+                                  (run_id, cluster_id)).fetchone()
+        if kind == "theme" and not theme:
+            return None
+        members = sorted(r[0] for r in self.conn.execute(
+            "SELECT pain_id FROM cluster_members WHERE cluster_id=?",
+            (cluster_id,))) if theme else []
+        rank = self.conn.execute("SELECT rank FROM rankings WHERE run_id=? AND cluster_id=?",
+                                 (run_id, cluster_id)).fetchone()
+        return {"kind": kind, "cluster_id": cluster_id,
+                "idea_id": key if kind == "idea" else None,
+                "label": theme[0] if theme else None, "title": title,
+                "member_pain_ids": json.dumps(members), "rank_at_vote": rank[0] if rank else None}
+
+    def _delete_feedback(self, run_id: str, snap: dict) -> int:
+        cols = FEEDBACK_SUBJECT[snap["kind"]]
+        return self.conn.execute(
+            "DELETE FROM feedback WHERE run_id=? AND kind=? AND "
+            + " AND ".join(f"{c}=?" for c in cols),
+            [run_id, snap["kind"], *(snap[c] for c in cols)]).rowcount
+
+    def save_feedback(self, run_id: str, kind: str, key: str, verdict: str, note: str = ""):
+        """Record a verdict, replacing any earlier vote on the same subject. A vote cast
+        before a re-cluster or a regenerate judged a different subject and is kept. Returns
+        the vote, or None when the run has no such theme or idea."""
+        from datetime import datetime, timezone
+        snap = self._feedback_snapshot(run_id, kind, key)
+        if snap is None:
+            return None
+        self._delete_feedback(run_id, snap)
+        row = {**snap, "verdict": verdict, "note": note,
+               "created_at": datetime.now(timezone.utc).isoformat()}
+        cur = self.conn.execute(
+            f"INSERT INTO feedback(run_id,{','.join(row)}) VALUES(?{',?' * len(row)})",
+            [run_id, *row.values()])
+        self.conn.commit()
+        return {**row, "id": cur.lastrowid, "member_pain_ids": json.loads(row["member_pain_ids"]),
+                "current": True}
+
+    def clear_feedback(self, run_id: str, kind: str, key: str):
+        """Withdraw the vote on the subject now under `key`. Returns the rows removed, or
+        None when the run has no such theme or idea."""
+        snap = self._feedback_snapshot(run_id, kind, key)
+        if snap is None:
+            return None
+        n = self._delete_feedback(run_id, snap)
+        self.conn.commit()
+        return n
+
+    def get_feedback(self, run_id: str):
+        """Every vote on the run, oldest first. `current` says whether the theme or idea now
+        under the vote's key is still the one that was judged."""
+        votes = [dict(zip(_FEEDBACK_COLS, r)) for r in self.conn.execute(
+            f"SELECT {','.join(_FEEDBACK_COLS)} FROM feedback WHERE run_id=? "
+            "ORDER BY created_at,id", (run_id,))]
+        now = {}
+        for v in votes:
+            subject = FEEDBACK_SUBJECT[v["kind"]]
+            k = (v["kind"], v[subject[0]])
+            if k not in now:
+                now[k] = self._feedback_snapshot(run_id, *k)
+            v["current"] = now[k] is not None and all(now[k][c] == v[c] for c in subject)
+            v["member_pain_ids"] = json.loads(v["member_pain_ids"] or "[]")
+        return votes
 
     # ---- stage 12: report ----
     def save_report(self, run_id: str, path: str):

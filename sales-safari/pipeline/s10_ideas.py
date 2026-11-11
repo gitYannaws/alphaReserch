@@ -32,8 +32,20 @@ For each theme, propose ONE concrete software product that solves the CORE pain.
 Return ONLY a JSON array, no prose, no code fences:
 [{"id","title","pitch"}] or [{"id","skip":true,"reason"}]
 
-THEMES:
 """
+
+REDRAFT_NOTE = """This theme already has a draft that is being replaced:
+{previous}
+Propose a DIFFERENT product. Do not reuse that title or pitch, and do not reword them.
+
+"""
+
+
+def _draft(payload: list, cfg: dict, steer: str = "") -> tuple[dict, str]:
+    """One stage-10a model call: ({theme id: item}, raw answer). Raises if the call fails."""
+    raw, _provider = _call_extractor(
+        IDEA_PROMPT + steer + "THEMES:\n" + json.dumps(payload, ensure_ascii=False), cfg)
+    return {str(it.get("id")): it for it in _parse_json_array(raw) if isinstance(it, dict)}, raw
 
 
 def _ideas_extract_cfg(extract_cfg: dict, model: str) -> dict:
@@ -294,9 +306,7 @@ def ideas_run(store, run_id: str, top_n: int = 5, extract_cfg: dict = None,
         payload = [_theme_payload(store, run_id, c) for c in clusters]
         cfg = _ideas_extract_cfg(extract_cfg, model)
         try:
-            raw, _provider = _call_extractor(IDEA_PROMPT + json.dumps(payload, ensure_ascii=False), cfg)
-            for it in _parse_json_array(raw):
-                llm_ideas[str(it.get("id"))] = it
+            llm_ideas, raw = _draft(payload, cfg)
             if not llm_ideas:
                 llm_error = f"model returned no usable ideas (raw: {raw[:120]!r})"
         except Exception as e:
@@ -334,3 +344,30 @@ def ideas_run(store, run_id: str, top_n: int = 5, extract_cfg: dict = None,
     store.set_stage(run_id, 10, "ideas_generated")
     return {"ideas": made, "from_llm": from_llm, "from_template": made - from_llm,
             "skipped": skipped, "llm_error": llm_error}
+
+
+def redraft_idea(store, run_id: str, idea: dict, extract_cfg: dict = None,
+                 model: str = None) -> tuple[str, str, str]:
+    """A new (title, pitch, permalink) for `idea`'s theme from the stage-10a prompt, steered
+    off the old draft.
+
+    Raises instead of falling back to the keyword template: the owner asked for a new idea,
+    and a template stored in its place would pass for one.
+    """
+    found = store.get_cluster_details(run_id, cluster_ids=[idea["cluster_id"]])
+    if not found:
+        raise RuntimeError(f"theme {idea['cluster_id']} is no longer in this run")
+    cluster = found[0]
+    previous = json.dumps({"title": idea["title"], "pitch": idea["pitch"]}, ensure_ascii=False)
+    items, raw = _draft([_theme_payload(store, run_id, cluster)],
+                        _ideas_extract_cfg(extract_cfg, model),
+                        REDRAFT_NOTE.format(previous=previous))
+    it = items.get(str(cluster["id"]))
+    if it and it.get("skip"):
+        raise RuntimeError(f"model declined this theme: {it.get('reason') or 'no reason given'}")
+    title, pitch = _clean_idea(it) if it else ("", "")
+    if not (title and pitch):
+        raise RuntimeError(f"model returned no usable idea (raw: {raw[:120]!r})")
+    if title.casefold() == (idea["title"] or "").casefold():
+        raise RuntimeError("model repeated the previous title")
+    return title, pitch, _permalink_for(cluster)

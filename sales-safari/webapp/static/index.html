@@ -94,6 +94,14 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   .eb{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:9px;font-size:10px;letter-spacing:0;text-transform:none}
   .eb.ok{background:#16301f;color:#5fd08a;border:1px solid #2c6b45}
   .eb.warn{background:#332414;color:#e0a458;border:1px solid #7a5320}
+  .vote{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .vote button,.ideaact .regen{padding:3px 10px;font-size:12px;font-weight:600;white-space:nowrap}
+  .vote button.on.yay{background:var(--ok);border-color:var(--ok);color:#0c1a10}
+  .vote button.on.nay{background:var(--err);border-color:var(--err);color:#1a0808}
+  .vote .vnote{width:170px;padding:4px 8px;font-size:12px}
+  .ideaact{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+  .idea .err:empty{display:none}
+  .busy{animation:pulse 1s infinite}
   .step{cursor:help}
   .filters-off{opacity:.4;pointer-events:none;filter:grayscale(1)}
   .slicers{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-bottom:12px}
@@ -348,9 +356,9 @@ header .nav{margin-left:auto;display:flex;gap:14px;font-size:13px}
   </div>
 
   <div class="card" id="rankingsCard" style="display:none">
-    <label>Ranked themes</label>
+    <label>Ranked themes <span class="dim" id="voteCount"></span></label>
     <div class="table-wrap">
-    <table><thead><tr data-sortgroup="rank"><th data-sort="rank">Rank</th><th data-sort="label">Theme</th><th data-sort="rank_score">Score</th><th data-sort="demand_score">Demand</th><th data-sort="recurrence_score">Recur</th><th data-sort="persistence_score">Persist</th><th data-sort="saturation_score">Sat.</th><th data-sort="distinct_authors">Authors</th></tr></thead>
+    <table><thead><tr data-sortgroup="rank"><th data-sort="rank">Rank</th><th data-sort="label">Theme</th><th data-sort="rank_score">Score</th><th data-sort="demand_score">Demand</th><th data-sort="recurrence_score">Recur</th><th data-sort="persistence_score">Persist</th><th data-sort="saturation_score">Sat.</th><th data-sort="distinct_authors">Authors</th><th>Your call</th></tr></thead>
     <tbody id="rankings"></tbody></table>
     </div>
     <div class="pager" id="rankPager">
@@ -931,13 +939,14 @@ async function ensureDetails(job, ids){
   return true;
 }
 async function loadRankings(job, runState=null){
-  const rows=await (await fetch(`/api/run/${job}/rankings`)).json();
+  const [rows] = await Promise.all([(await fetch(`/api/run/${job}/rankings`)).json(), loadVotes(job)]);
   $("rankingsCard").style.display="block";
   if(!rows.length){
     const msg = runOutcomeMsg(runState || {});
-    $("rankings").innerHTML = `<tr><td colspan="8" class="dim">${esc(msg || "No ranked themes were produced for this run.")}</td></tr>`;
+    $("rankings").innerHTML = `<tr><td colspan="9" class="dim">${esc(msg || "No ranked themes were produced for this run.")}</td></tr>`;
     RANKINGS = []; RANK_OFFSET = 0;
     setPager("rank", 0, RANK_SIZE, 0);
+    $("voteCount").textContent = "";
     return;
   }
   RANK_JOB = job;
@@ -974,7 +983,55 @@ function renderRankings(){
       ${scoreBreakdownHtml(r)}${sourcesHtml(RANK_BY_CLUSTER[r.cluster_id])}</td>
     <td class="big">${n(r.rank_score)}</td><td>${n(r.demand_score)}</td>
     <td>${n(r.recurrence_score)}</td><td>${n(r.persistence_score)}</td><td>${n(r.saturation_score)}</td>
-    <td class="big">${esc(r.distinct_authors)}</td></tr>`).join("");
+    <td class="big">${esc(r.distinct_authors)}</td><td>${voteHtml("theme", r.cluster_id, r.cluster_id)}</td></tr>`).join("");
+  renderVoteCount();
+}
+
+/* The owner's yay/nay votes, the project's only human ground truth. VOTES holds the
+   CURRENT ones by where they show: theme by cluster id, idea by idea id. A vote cast before
+   a re-cluster judged a different theme under the same id, so the server marks it not
+   current and it stays out of here (it is still exported). */
+let VOTES={theme:{}, idea:{}};
+async function loadVotes(job){
+  const list=await (await fetch(`/api/run/${job}/feedback`)).json();
+  VOTES={theme:{}, idea:{}};
+  (list||[]).filter(v=>v.current).forEach(v=>{ VOTES[v.kind][v.kind==="theme" ? v.cluster_id : v.idea_id]=v; });
+}
+function voteHtml(kind, key, clusterId){
+  const v=VOTES[kind][key], cur=v ? v.verdict : "";
+  const btn=(verdict, icon, text)=>`<button type="button" class="secondary ${verdict}${cur===verdict?" on":""}" data-verdict="${verdict}" aria-pressed="${cur===verdict}" title="${cur===verdict?"Click again to clear":"Mark "+text}">${icon} ${text}</button>`;
+  return `<span class="vote" data-kind="${kind}" data-key="${esc(key)}" data-cluster="${esc(clusterId)}">${
+    btn("yay","&#128077;","Yay")}${btn("nay","&#128078;","Nay")}${
+    cur==="nay" ? `<input class="vnote" placeholder="why?" maxlength="300" aria-label="Why nay? (optional)" value="${esc(v.note)}">` : ""}</span>`;
+}
+function renderVoteCount(){
+  const top=RANKINGS.filter(r=>!r.dropped).slice(0,25);
+  const yay=top.filter(r=>VOTES.theme[r.cluster_id]?.verdict==="yay").length;
+  const nay=top.filter(r=>VOTES.theme[r.cluster_id]?.verdict==="nay").length;
+  $("voteCount").innerHTML=`— ${yay} yay · ${nay} nay · ${top.length-yay-nay} unrated in top 25 · `+
+    `<a href="/api/run/${encodeURIComponent(RANK_JOB)}/feedback/export" download="gold-themes.json" title="Every vote on this run with its snapshot. Save as db/gold-themes.json for bench/score_ranking.py">export</a>`;
+}
+// Clicking the active verdict clears it. A note (only on nay) re-sends nay with the note.
+async function castVote(span, verdict, note){
+  const {kind, key, cluster}=span.dataset, cur=VOTES[kind][key];
+  const send = note===undefined && cur && cur.verdict===verdict ? "clear" : verdict;
+  const body={kind, cluster_id:cluster, verdict:send, note:note||""};
+  if(kind==="idea") body.idea_id=key;
+  span.querySelectorAll("button").forEach(b=>b.disabled=true);
+  const r=await fetch(`/api/run/${$("statusCard").dataset.jobId}/feedback`,
+    {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){
+    span.querySelectorAll("button").forEach(b=>b.disabled=false);
+    alert(`Vote failed: ${d.error||r.status}`);
+    return;
+  }
+  if(d.vote) VOTES[kind][key]=d.vote; else delete VOTES[kind][key];
+  span.outerHTML=voteHtml(kind, key, cluster);
+  const fresh=document.querySelector(`.vote[data-kind="${kind}"][data-key="${CSS.escape(key)}"]`);
+  // Keep the keyboard where it was; a fresh nay goes straight to its "why?" box.
+  (send==="nay" && note===undefined ? fresh?.querySelector(".vnote") : fresh?.querySelector(`button[data-verdict="${verdict}"]`))?.focus();
+  if(kind==="theme") renderVoteCount();
 }
 
 function reviewsHtml(list){
@@ -1023,12 +1080,14 @@ function briefHtml(b){
     ${list("Risks", b.risks)}
   </div>`;
 }
+let IDEA_COMPS = {}, IDEA_REVS = {}, IDEA_BRIEFS = {};
 async function loadIdeas(job, runState=null){
   const [rows, comps, revs, briefs] = await Promise.all([
     (await fetch(`/api/run/${job}/ideas`)).json(),
     (await fetch(`/api/run/${job}/competitors`)).json(),
     (await fetch(`/api/run/${job}/reviews`)).json(),
     (await fetch(`/api/run/${job}/briefs`)).json(),
+    loadVotes(job),
   ]);
   $("ideasCard").style.display="block";
   if(!rows.length){
@@ -1036,16 +1095,40 @@ async function loadIdeas(job, runState=null){
     $("ideas").innerHTML = `<div class="dim">${esc(msg || "No ideas were generated for this run.")}</div>`;
     return;
   }
-  const byCluster = {}, revByComp = {}, briefByIdea = {};
-  (comps||[]).forEach(c=>{ (byCluster[c.cluster_id] ||= []).push(c); });
-  (revs||[]).forEach(r=>{ (revByComp[r.competitor_id] ||= []).push(r); });
-  (briefs||[]).forEach(b=>{ briefByIdea[b.idea_id]=b; });
-  $("ideas").innerHTML=rows.map(i=>`<div class="idea">
+  IDEA_COMPS = {}; IDEA_REVS = {}; IDEA_BRIEFS = {};
+  (comps||[]).forEach(c=>{ (IDEA_COMPS[c.cluster_id] ||= []).push(c); });
+  (revs||[]).forEach(r=>{ (IDEA_REVS[r.competitor_id] ||= []).push(r); });
+  (briefs||[]).forEach(b=>{ IDEA_BRIEFS[b.idea_id]=b; });
+  $("ideas").innerHTML=rows.map(ideaHtml).join("");
+}
+function ideaHtml(i){
+  // A regenerate deletes the brief: it argued for the old idea. Say so rather than go blank.
+  const brief = IDEA_BRIEFS[i.id] ? briefHtml(IDEA_BRIEFS[i.id])
+    : i.regenerated_at ? `<div class="brief"><span class="eb warn">brief stale, rerun brief</span></div>` : "";
+  return `<div class="idea" data-idea="${esc(i.id)}">
     <h3>${esc(i.title)}</h3><p>${esc(i.pitch)}</p>
-    ${briefHtml(briefByIdea[i.id])}
-    ${compHtml(byCluster[i.cluster_id], revByComp)}
+    <div class="ideaact">${voteHtml("idea", i.id, i.cluster_id)}<button type="button" class="secondary regen" data-regen="${esc(i.id)}" title="Draft a different idea for this theme with the run's idea model. Its brief is dropped.">Regenerate</button></div>
+    <div class="err"></div>
+    ${brief}
+    ${compHtml(IDEA_COMPS[i.cluster_id], IDEA_REVS)}
     ${i.evidence_permalink ? `<p><a href="${esc(i.evidence_permalink)}" target="_blank" rel="noopener">evidence</a></p>` : ""}
-  </div>`).join("");
+  </div>`;
+}
+async function regenerateIdea(btn){
+  const card=btn.closest(".idea"), id=btn.dataset.regen;
+  btn.disabled=true; btn.textContent="Regenerating…"; btn.classList.add("busy");
+  card.querySelector(".err").textContent="";
+  const r=await fetch(`/api/run/${$("statusCard").dataset.jobId}/ideas/${encodeURIComponent(id)}/regenerate`, {method:"POST"});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){
+    btn.disabled=false; btn.textContent="Regenerate"; btn.classList.remove("busy");
+    card.querySelector(".err").textContent=d.error || `Regenerate failed (${r.status})`;
+    return;
+  }
+  // The old vote judged the old title; the server no longer counts it as current either.
+  delete IDEA_BRIEFS[id]; delete VOTES.idea[id];
+  card.outerHTML=ideaHtml(d);
+  document.querySelector(`.idea[data-idea="${CSS.escape(id)}"] .regen`)?.focus();
 }
 
 /* Pains are paged on the server now. PAINS holds one page, never the whole run:
@@ -1714,6 +1797,15 @@ $("rankNext").addEventListener("click",()=>{ RANK_OFFSET+=RANK_SIZE; renderRanki
 $("rankSize").addEventListener("change",()=>{ RANK_SIZE=parseInt($("rankSize").value,10)||20; RANK_OFFSET=0; renderRankings(); });
 document.querySelectorAll("#painSlicers .chip").forEach(c=>c.addEventListener("click",()=>toggleChip(c)));
 $("pClear").addEventListener("click",clearPainFilters);
+document.addEventListener("click", e => {
+  const vote=e.target.closest?.(".vote button[data-verdict]");
+  if(vote) castVote(vote.closest(".vote"), vote.dataset.verdict);
+  const regen=e.target.closest?.("button[data-regen]");
+  if(regen) regenerateIdea(regen);
+});
+document.addEventListener("change", e => {
+  if(e.target.matches?.(".vote .vnote")) castVote(e.target.closest(".vote"), "nay", e.target.value);
+});
 $("wGram").addEventListener("change",renderWords);
 $("wTop").addEventListener("change",renderWords);
 /* A bar is a filter, not a decoration: clicking one puts the term in the pain search so

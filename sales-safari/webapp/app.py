@@ -26,7 +26,7 @@ from pipeline.collectors.reddit_collector import RedditCollector
 from pipeline.discover import discover_reddit_thread_urls
 from pipeline.orchestrate import corpus_key_for_seed, load_config, normalize_seed, pick_collector
 from pipeline.retry import run_with_retry
-from pipeline.store import Store
+from pipeline.store import FEEDBACK_SUBJECT, Store
 from pipeline.wordrank import ReiterableRows, rank_terms
 
 load_dotenv()
@@ -279,6 +279,14 @@ class MergeAnalyzeReq(BaseModel):
     source_ids: list[str]
     extractor: Optional[str] = None
     label: Optional[str] = None
+
+
+class FeedbackReq(BaseModel):
+    kind: str                         # "theme" | "idea"
+    cluster_id: Optional[str] = None
+    idea_id: Optional[str] = None     # required when kind is "idea"
+    verdict: str                      # "yay" | "nay" | "clear"
+    note: Optional[str] = None
 
 
 def _check_cancelled(job: dict):
@@ -1810,6 +1818,85 @@ def reviews(job_id: str):
     out = store.get_reviews(job_id)
     store.close()
     return out
+
+
+@app.post("/api/run/{job_id}/ideas/{idea_id}/regenerate")
+def regenerate_idea(job_id: str, idea_id: str):
+    """Re-draft one idea with the run's own stage-10a model, keeping its id, and drop its
+    brief. A plain `def`, so FastAPI runs the model call on its threadpool, off the loop."""
+    from pipeline.resume import _run_config as _persisted_run_config
+    from pipeline.s10_ideas import redraft_idea
+    store = Store(DB)
+    try:
+        idea = next((i for i in store.get_ideas(job_id) if i["id"] == idea_id), None)
+        if not idea:
+            return JSONResponse({"error": "unknown idea"}, status_code=404)
+        run = store.get_run(job_id) or {}
+        # A live runner re-clusters, clears ideas and writes briefs under this idea's feet.
+        if run.get("status") in ACTIVE_RUN_STATUSES:
+            return JSONResponse({"error": f"run is {run['status']}; regenerate once it stops"},
+                                status_code=409)
+        run_cfg = _persisted_run_config(CFG, run)
+        try:
+            title, pitch, permalink = redraft_idea(
+                store, job_id, idea, extract_cfg=run_cfg.get("extract", {}),
+                model=run_cfg.get("ideas", {}).get("model"))
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"regenerate failed, idea left unchanged: {str(e)[:300]}"},
+                status_code=502)
+        store.replace_idea(job_id, idea_id, title, pitch, permalink)
+        return next(i for i in store.get_ideas(job_id) if i["id"] == idea_id)
+    finally:
+        store.close()
+
+
+@app.post("/api/run/{job_id}/feedback")
+def save_feedback(job_id: str, req: FeedbackReq):
+    """The owner's yay/nay on a theme or idea; "clear" withdraws it. Label, members and rank
+    are snapshotted from the DB, never taken from the request."""
+    if req.kind not in FEEDBACK_SUBJECT:
+        return JSONResponse({"error": "kind must be 'theme' or 'idea'"}, status_code=400)
+    if req.verdict not in ("yay", "nay", "clear"):
+        return JSONResponse({"error": "verdict must be 'yay', 'nay' or 'clear'"},
+                            status_code=400)
+    key_field = FEEDBACK_SUBJECT[req.kind][0]
+    key = getattr(req, key_field)
+    if not key:
+        return JSONResponse({"error": f"{key_field} required"}, status_code=400)
+    note = " ".join((req.note or "").split())[:300]
+    store = Store(DB)
+    try:
+        result = (store.clear_feedback(job_id, req.kind, key) if req.verdict == "clear"
+                  else store.save_feedback(job_id, req.kind, key, req.verdict, note))
+    finally:
+        store.close()
+    if result is None:
+        return JSONResponse({"error": f"unknown {req.kind}"}, status_code=404)
+    return {"vote": None if req.verdict == "clear" else result}
+
+
+@app.get("/api/run/{job_id}/feedback")
+def feedback(job_id: str):
+    store = Store(DB)
+    out = store.get_feedback(job_id)
+    store.close()
+    return out
+
+
+GOLD_FIELDS = ("kind", "verdict", "label", "title", "member_pain_ids", "rank_at_vote", "note",
+               "created_at")
+
+
+@app.get("/api/run/{job_id}/feedback/export")
+def export_feedback(job_id: str):
+    """The run's votes as a gold set for bench/score_ranking.py (save as db/gold-themes.json).
+    No ids: a re-cluster reuses them, so only the snapshot can find a vote's theme later."""
+    store = Store(DB)
+    votes = store.get_feedback(job_id)
+    store.close()
+    return {"run_id": job_id, "exported_at": datetime.now(timezone.utc).isoformat(),
+            "votes": [{k: v[k] for k in GOLD_FIELDS} for v in votes]}
 
 
 @app.get("/api/run/{job_id}/report", response_class=PlainTextResponse)
