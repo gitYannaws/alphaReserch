@@ -397,7 +397,8 @@ class Runner:
                             min_support=(self.cfg.get("rank", {}).get("min_support")
                                          if sf_cfg.get("only_rankable", True) else None))
         return (f"solvable={sf.get('counts')} warned={sf.get('flagged')} "
-                f"skipped_unrankable={sf.get('skipped_unrankable')}")
+                f"skipped_unrankable={sf.get('skipped_unrankable')} "
+                f"evidence_missing={sf.get('evidence_missing')}")
 
     def _competitors(self, store):
         from pipeline.s9b_competitors import competitors_run

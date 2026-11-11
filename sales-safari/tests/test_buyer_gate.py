@@ -52,7 +52,7 @@ class BuyerTestVerdicts(_TempStore):
         original = s7b_softfilter._call_extractor
         s7b_softfilter._call_extractor = fake
         try:
-            s7b_softfilter.softfilter_run(self.store, RUN, {}, min_support=None)
+            self.result = s7b_softfilter.softfilter_run(self.store, RUN, {}, min_support=None)
         finally:
             s7b_softfilter._call_extractor = original
         rows = self.store.conn.execute(
@@ -87,6 +87,46 @@ class BuyerTestVerdicts(_TempStore):
                                    "evidence": {"workaround": True, "cost": True,
                                                 "recurring": True, "platform_only": True}}])
         self.assertEqual(rows["c1"]["solvable"], "platform_feature")
+
+    def test_flattened_or_stringified_evidence_is_read_not_replaced(self):
+        self._theme("flat")
+        self._theme("text")
+        rows, _ = self._classify([
+            {"id": "flat", "solvable": "yes", "confidence": 0.9, "reason": "monthly invoicing",
+             "cost": True, "recurring": True},
+            {"id": "text", "solvable": "yes", "confidence": 0.9, "reason": "monthly invoicing",
+             "evidence": json.dumps({"cost": True, "recurring": "true"})}])
+        for tid in ("flat", "text"):
+            with self.subTest(shape=tid):
+                self.assertEqual(rows[tid]["solvable"], "yes")
+                self.assertEqual(rows[tid]["evidence"], {
+                    "workaround": False, "cost": True, "recurring": True, "payer": False,
+                    "platform_only": False, "venue": False})
+        self.assertEqual(self.result["evidence_missing"], 0)
+
+    def test_missing_evidence_is_stored_as_unknown_and_counted(self):
+        """The model said nothing about the fields, so nothing may be recorded as false."""
+        self._theme("c1")
+        rows, _ = self._classify([{"id": "c1", "solvable": "yes", "confidence": 0.9,
+                                   "reason": "monthly invoicing"}])
+        self.assertEqual(rows["c1"]["solvable"], "partial", "a yes it cannot back is downgraded")
+        self.assertIsNone(rows["c1"]["evidence"])
+        self.assertEqual(self.result["evidence_missing"], 1)
+
+    def test_the_runner_line_carries_the_missing_evidence_count(self):
+        from types import SimpleNamespace
+        from pipeline.resume import Runner
+        self._theme("c1")
+        runner = SimpleNamespace(cfg={"soft_filter": {"only_rankable": False}}, job_id=RUN,
+                                 _set_progress=lambda *a: None)
+        original = s7b_softfilter._call_extractor
+        s7b_softfilter._call_extractor = lambda prompt, cfg: (json.dumps(
+            [{"id": "c1", "solvable": "yes", "confidence": 0.9, "reason": "r"}]), "test")
+        try:
+            line = Runner._softfilter(runner, self.store)
+        finally:
+            s7b_softfilter._call_extractor = original
+        self.assertIn("evidence_missing=1", line)
 
     def test_venue_is_recorded_as_evidence_and_not_as_a_warning(self):
         self._theme("c1")
@@ -139,11 +179,10 @@ class RankFormula(_TempStore):
         self.assertAlmostEqual(
             rows["young_and_strong"]["rank_breakdown"]["persistence_multiplier"],
             0.75 + 0.5 * 2 / 9)
-        for row in rows.values():
-            b = row["rank_breakdown"]
-            self.assertEqual(row["rank_score"],
-                             round(b["demand"] * b["persistence_multiplier"] * b["solvable_weight"], 2),
-                             "the stored breakdown must reproduce the score")
+        # demand x (0.75 + 0.5 x (persistence - 1) / 9) x yes 1.0 x (0.5 + 0.5 x confidence 0.9)
+        self.assertEqual({cid: row["rank_score"] for cid, row in rows.items()}, {
+            "old_and_weak": round(5.0 * (0.75 + 0.5 * 8.5 / 9) * 0.95, 2),
+            "young_and_strong": round(7.5 * (0.75 + 0.5 * 2 / 9) * 0.95, 2)})
 
     def test_the_judges_confidence_moves_the_rank(self):
         self._theme("sure", demand=6.0, persistence=5.0, confidence=0.9)

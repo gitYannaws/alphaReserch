@@ -82,9 +82,25 @@ def _flag(value) -> bool:
     return str(value).strip().lower() in ("true", "yes", "1")
 
 
+def _evidence_object(item: dict):
+    """The evidence fields wherever the model put them: nested as asked, nested as a JSON
+    string, or flattened onto the item. None when no field is present anywhere."""
+    raw = item.get("evidence")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    for candidate in (raw, item):
+        if isinstance(candidate, dict) and any(f in candidate for f in EVIDENCE_FIELDS):
+            return candidate
+    return None
+
+
 def _coerce(item: dict) -> tuple:
     """The buyer-test rule is enforced here too: a model that answers "yes" against its own
-    evidence is not taken at its word."""
+    evidence is not taken at its word. Evidence is None when the model gave none: storing
+    all-false would claim it found no workaround and no cost when it said nothing."""
     solvable = str(item.get("solvable") or "").strip().lower()
     if solvable not in VALID:
         solvable = "partial"
@@ -94,7 +110,9 @@ def _coerce(item: dict) -> tuple:
         conf = 0.0
     conf = max(0.0, min(1.0, conf))
     reason = str(item.get("reason") or "").strip()[:160]
-    raw = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    raw = _evidence_object(item)
+    if raw is None:
+        return ("partial" if solvable == "yes" else solvable), conf, reason, None
     evidence = {field: _flag(raw.get(field)) for field in EVIDENCE_FIELDS}
     if evidence["platform_only"]:
         solvable = "platform_feature"
@@ -192,7 +210,7 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
             if tid in asked:
                 items[tid] = it
 
-    counts, classified, flagged = {}, 0, 0
+    counts, classified, flagged, evidence_missing = {}, 0, 0, 0
     for i, cluster in enumerate(clusters, start=1):
         warnings = evaluate_cluster(cluster, enabled_filters) if enabled_filters else []
         flagged += 1 if warnings else 0
@@ -202,6 +220,7 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
             solvable, conf, reason, evidence = _coerce(it)
             counts[solvable] = counts.get(solvable, 0) + 1
             classified += 1
+            evidence_missing += evidence is None
         elif cluster["id"] not in rankable:
             # Never asked: it cannot clear min_support, so a verdict would change nothing.
             # Say that, rather than let it read as a model that declined to answer.
@@ -217,7 +236,8 @@ def softfilter_run(store, run_id: str, extract_cfg: dict = None, progress=None,
 
     store.set_stage(run_id, 7, "soft-filtered")
     return {"checked": len(clusters), "classified": classified, "counts": counts,
-            "flagged": flagged, "skipped_unrankable": skipped}
+            "flagged": flagged, "skipped_unrankable": skipped,
+            "evidence_missing": evidence_missing}
 
 
 if __name__ == "__main__":
