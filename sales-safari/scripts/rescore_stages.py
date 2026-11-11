@@ -118,6 +118,9 @@ def main(argv=None) -> int:
     ap.add_argument("--final-min-cluster-size", type=int, default=None,
                     help="min_cluster_size for the post-judge clustering "
                          "(default: rank.min_support.evidence_count)")
+    ap.add_argument("--no-audit", action="store_true",
+                    help="skip the LLM naming audit in cluster2 (themes get a central-member "
+                         "quote as their name; ~12 s per theme saved)")
     args = ap.parse_args(argv)
 
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
@@ -145,7 +148,7 @@ def main(argv=None) -> int:
                 # The judge withholds most members of a pass-1 theme (measured 8% kept on the
                 # ranked slice), so the survivors re-form themes at the rank gate's own evidence
                 # floor rather than the pass-1 size that decided who was worth judging.
-                r = _cluster(store, args.run_id, cfg, audit=True,
+                r = _cluster(store, args.run_id, cfg, audit=not args.no_audit,
                              min_cluster_size=args.final_min_cluster_size)
             elif step == "softfilter":
                 r = _softfilter(store, args.run_id, cfg)
